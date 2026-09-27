@@ -9,11 +9,16 @@ Run `python -m atx.device` to print what was detected.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from functools import cache
+
+# CPU threads for OCR, CTranslate2 and llama.cpp: the performance cores only (6 on
+# the target's Core Ultra 7 155H). Efficiency cores slow down evenly split work.
+CPU_THREADS = int(os.environ.get("ATX_THREADS", "6"))
 
 # Order of preference for onnxruntime execution providers.
 _ONNX_PREFERENCE = ["CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"]

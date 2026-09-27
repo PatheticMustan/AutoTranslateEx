@@ -98,7 +98,7 @@ The server detects the device once at startup and reports it in `/health`. Each 
 ## Model choices
 
 ### Detection: not the bottleneck
-PP-OCR's own text-line detector runs in roughly tens of milliseconds on a ~690×1500 page. A separate bubble detector would **not** make things faster. It would only make them *better*:
+PP-OCR's own text-line detector takes ~130 ms on CPU for a ~690×1500 page when its input is capped at 960px (measured in Phase 1). A separate bubble detector would **not** make things faster. It would only make them *better*:
 - more correct grouping of lines into bubbles;
 - skipping sound effects and signs;
 - a fill shape that matches the bubble.
@@ -118,6 +118,8 @@ Via RapidOCR + onnxruntime: no PaddlePaddle or PyTorch install.
 - PP-OCRv5 mobile as the comparison point.
 
 Pick whichever has the lowest character error rate on our Traditional-Chinese samples within budget.
+
+**Chosen (Phase 1):** PP-OCRv6 small detector + small recognizer, detection capped at 960px, on CPU: 3.7% error, 100% bubble recall, ~250 ms per page on the dev machine. See the Phase 1 results.
 
 ### Translation: three tiers
 
@@ -180,6 +182,38 @@ extension/
 - Debug CLI: `python -m atx.pipeline page.jpg --debug out.png` draws the boxes with their text.
 - `bench_ocr.py` reports character error rate, bubbles found vs. true bubbles, time per page and peak RAM for each model set.
 - Unit tests for grouping on synthetic boxes.
+
+**Results (dev machine, 2026-09-27; 20 pages, truth = 5 pages / 30 text regions / 407 characters):**
+
+| Config (detection size, device) | Error rate | Bubble recall | ms/page (mean / p90) | Peak MB |
+|---|---|---|---|---|
+| **v6-small @960 CPU** (chosen default) | **3.7%** | 100% | 253 / 432 | 353 |
+| v6-small @960 DirectML (RTX 3070 Ti) | 3.7% | 100% | 110 / 209 | 599 |
+| v6-small, full resolution, CPU | 3.2% | 100% | 734 / 942 | 591 |
+| v6-small @720 CPU | 13.5% | 87% | 216 / 359 | 306 |
+| v6-small-tiny @960 CPU | 11.8% | 100% | 176 / 224 | 248 |
+| v6-tiny @960 CPU | 20.1% | 87% | 198 / 380 | 236 |
+| v5-mobile @960 CPU | 9.6% | 93% | 627 / 1015 | 328 |
+| cht-v3 (dedicated Traditional recognizer) @960 CPU | 28.5% | 70% | 278 / 551 | 251 |
+| v6-medium, v5-server | not run: ~30–50 s per page on CPU | | | |
+
+Findings:
+- **The comic uses vertical text.** Almost all dialogue is in right-to-left columns; recap pages use horizontal narration boxes. PP-OCRv6 reads both.
+- **Detection size is the main speed lever.** Capping the detection input at 960px (longest side) makes it ~4× faster than full resolution for +0.5 points of error; 720px is too small (error jumps to 13.5%). RapidOCR's own "max" mode ignores the size setting, so `ocr.py` overrides its hook.
+- **The tiny recognizer is what costs accuracy**, not the tiny detector. The old dedicated Traditional-Chinese model is the worst option; PP-OCRv6's multilingual model reads Traditional better.
+- **Remaining errors in v6-small @960:** 9 of the 15 wrong characters are one narration line under the site's watermark logo; the rest are tilted text and bubbles cut off at page edges. Excluding the watermarked line, the error rate is ~1.5%.
+- **Grouping** was tuned on the truth pages: columns within a bubble touch, separate bubbles are ~0.8 glyphs apart, so lines merge when boxes grown by 0.45× glyph size touch. Column order uses clustering, not rounding.
+- **Speed vs. budget:** CPU mean 253 ms is under the 0.35 s target, but p90 (432 ms) is over. The 155H's performance cores are roughly comparable to the 12900H's, so expect similar numbers on the target; confirm there in Phase 2. Timing on the dev laptop is noisy (hybrid-core scheduling).
+- **Open for later:** filter the site watermark (a fixed logo; its regions don't match the glyph size of nearby text), and try a detection size between 720 and 960 if the target needs more speed.
+
+### Phase 1b: Normalize text before scoring OCR
+Pages can print variant glyphs (e.g. the Japanese-style 説 for 說, common in manga translations). OCR may return either form, and so may the truth files, so an exact-character comparison counts correct reads as errors.
+- Add `normalize(text)` in `bench/` and apply it to both OCR output and truth before computing character error rate:
+  - fold full-width ASCII letters, digits and punctuation to half-width (`，`→`,`, `Ｃ`→`C`) with NFKC, but keep CJK punctuation such as `。` and `、`;
+  - map a small table of variant characters to one canonical form (説→說, and others as they turn up in the samples);
+  - strip whitespace.
+- Scoring only: the pipeline still sends the raw OCR text to translation.
+- Unit tests for the fold and the variant table.
 
 ### Phase 2: Translation tiers and comparison
 - `opus.py`: CTranslate2 conversion script, OpenCC Traditional→Simplified, batching.
