@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Large or local-only data
+server/models/
+server/samples/
+server/cache.db
+server/bench/report*.html
+server/bench/out/

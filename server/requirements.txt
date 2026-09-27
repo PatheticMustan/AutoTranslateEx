@@ -1,0 +1,16 @@
+# OCR
+rapidocr>=3.4
+onnxruntime-directml>=1.20
+# Translation (very quick tier)
+ctranslate2>=4.5
+sentencepiece
+opencc
+# Server
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart
+httpx
+# Common
+numpy
+pillow
+pytest
