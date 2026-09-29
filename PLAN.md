@@ -33,12 +33,12 @@ The GPU is used when it is available *and* faster; otherwise the CPU (see [Compu
 | OCR | — (runs on CPU) | ≤ 0.35 s | ≤ 0.15 s |
 | Very quick | — (runs on CPU) | ≤ 0.3 s (plus OCR) | ≤ 0.3 s |
 | Quick (bubbles in parallel) | ≤ 3 s | ≤ 5 s | ≤ 2 s |
-| Accurate, Qwen3.5-2B | ≤ 10 s | ≤ 15 s | — |
+| Accurate, Hy-MT2 + context (target default) | ≤ 4 s | ≤ 6 s | 0.6 s (measured) |
 | Accurate, Qwen3.5-4B | 17–25 s (slower than reading) | 25–35 s | ≤ 4 s |
 
 - **Token generation** is limited by memory bandwidth, so the Arc iGPU is only ~1.2× faster than the CPU there. **Prompt reading** is compute-bound; without XMX the iGPU is only ~2× faster. On the target, CPU and iGPU are close; the iGPU path mainly frees the CPU for OCR and the browser.
 - A discrete GPU speeds up the LLM tiers ~8–12× because of its much higher VRAM bandwidth.
-- Prefetching hides latency only when translation is faster than reading (~10–20 s per page). The accurate tier with the 4B model is not, so the target uses the 2B model for that tier (see [Model choices](#translation-three-tiers)).
+- Prefetching hides latency only when translation is faster than reading (~10–20 s per page). The accurate tier with the 4B model is not, so the target uses Hy-MT2 with context for that tier (see [Model choices](#translation-three-tiers)).
 - Estimates assume the laptop is plugged in on Best Performance. Expect ~15–25% slowdown under sustained load (28 W sustained power) and much more on battery in efficiency mode.
 
 **Memory budget (target):** with an integrated GPU the LLM weights sit in *shared system RAM*, not VRAM.
@@ -47,7 +47,7 @@ The GPU is used when it is available *and* faster; otherwise the CPU (see [Compu
 |---|---|
 | Very quick | ~0.5 GB |
 | Quick (Hy-MT2-1.8B) | ~1.8 GB |
-| Accurate (Qwen3.5-2B) | ~2.3 GB |
+| Accurate (Hy-MT2 + context, `-np 8`, 1024 ctx per slot) | ~2 GB |
 | Accurate (Qwen3.5-4B) | ~3.5–4 GB (risky against ~6.4 GB free; swapping to the 5 GB page file would be catastrophic) |
 
 ### Site facts (verified 2026-09-26)
@@ -86,7 +86,7 @@ The server detects the device once at startup and reports it in `/health`. Each 
 - `atx/device.py` holds the detection. The rest of the code just asks it which device to use.
 - The fallback is logged and shown in the popup's status line (e.g. "GPU: RTX 3070 Ti" or "CPU (GPU init failed)"), so a silent drop to CPU is visible.
 - **CPU threads:** use the performance cores only (`-t 6` for llama.cpp on the 155H; 6 threads for CTranslate2 and onnxruntime). Efficiency and low-power cores tend to slow down work split evenly across all threads.
-- **Free-memory check:** at startup and before each tier switch, the server reads free RAM. Below ~5 GB free, the accurate tier uses Qwen3.5-2B instead of 4B, and `/health` reports why.
+- **Free-memory check:** at startup and before each tier switch, the server reads free RAM. Below ~5 GB free, the accurate tier uses Hy-MT2 with context instead of Qwen3.5-4B, even on a discrete GPU, and `/health` reports why.
 - On an iGPU, check in Task Manager whether llama.cpp's Vulkan build keeps the weights twice (mapped file + GPU copy). If so, start it with `--no-mmap`.
 - The Meteor Lake NPU (~11 TOPS) is not worth targeting; it would be slower than the iGPU for all of this.
 
@@ -127,10 +127,10 @@ Pick whichever has the lowest character error rate on our Traditional-Chinese sa
 |---|---|---|---|---|
 | **Very quick** | Helsinki-NLP `opus-mt-zh-en` + OpenCC Traditional→Simplified | CTranslate2 int8 | ~80 MB | Every bubble on the page in one batch |
 | **Quick** | Tencent **Hy-MT2-1.8B** (translation-specialized, handles zh-Hant, Apache-2.0) | llama.cpp `llama-server` | ~1.1 GB (Q4_K_M) | One request per bubble with the official prompt template, **all bubbles sent concurrently** (`llama-server -np 8`, ~512 context tokens per slot) so decoding is batched |
-| **Accurate** | **Qwen3.5-2B** on the target; **Qwen3.5-4B** on a discrete GPU. Thinking turned off (Apache-2.0) | llama.cpp `llama-server` | ~1.3 GB / ~2.5–3 GB (Q4) | The whole page in one prompt, plus the previous page's text for consistent names and tone |
+| **Accurate** | **Qwen3.5-4B** (thinking off, Apache-2.0) on a discrete GPU with ≥ 6 GB VRAM; **Hy-MT2-1.8B with context** everywhere else, including the target | llama.cpp `llama-server` | ~2.6 GB / ~1.1 GB (Q4) | Qwen: the whole page in one prompt, plus the previous page. Hy-MT2: one request per bubble with Tencent's contextual template, showing the 8 preceding bubbles (previous page, then earlier bubbles on this page) |
 
 - Accurate-tier prompt layout: fixed instructions first so llama-server's prompt cache reuses them, then the previous page, then the current page's bubbles as JSON. The output is **only a JSON array of translated strings** (no echoed source, no keys), which cuts output tokens ~20%.
-- Accurate-tier model choice: the 4B model would take ~17–25 s per page on the target, slower than reading, and ~3.5–4 GB of the ~6.4 GB free RAM. It stays the default on a discrete GPU. Phase 2 checks whether the 2B model's quality is good enough; if not, try Hy-MT2 with page context.
+- Accurate-tier model choice: the 4B model would take ~17–25 s per page on the target, slower than reading, and ~3.5–4 GB of the ~6.4 GB free RAM. It stays the default on a discrete GPU. Qwen3.5-2B was tried for the target and rejected in Phase 2 (unreliable); Hy-MT2 with context replaced it. `translators.resolve("accurate")` picks between them from the detected GPU.
 - Qwen3.5's small models use a newer hybrid attention design; confirm the Vulkan build runs all of it on the GPU rather than quietly handing ops back to the CPU.
 - Fallback for the quick tier: HY-MT1.5-1.8B GGUF, if Hy-MT2 misbehaves on stock llama.cpp. Its model card mentions a special kernel from a llama.cpp PR for some quantizations; check this in Phase 2.
 - Only one LLM is loaded at a time. Switching tiers restarts the `llama-server` process with a different GGUF. The Python server manages that process.
@@ -233,6 +233,7 @@ Pages can print variant glyphs (e.g. the Japanese-style 説 for 說, common in m
 | very_quick (opus-mt, int8) | CPU (CUDA unusable: no cuBLAS DLL) | 144 / 371 | 27 | — | 285 MB (in-process) |
 | quick (Hy-MT2-1.8B, `-np 8`) | GPU, 1.4 GB VRAM | 390 / 912 | 74 | 85 per request | 1.7 GB |
 | quick-serial (`-np 1`) | GPU, 1.2 GB VRAM | 522 / 1255 | 100 | 176 | 1.7 GB |
+| accurate-hymt (Hy-MT2-1.8B + context, `-np 8`) | GPU, 1.6 GB VRAM | 589 / 1436 | 113 | 51 per request | 2.2 GB |
 | accurate-2b (Qwen3.5-2B) | GPU, 1.3 GB VRAM | 698 / 1563 | 133 | 160 | 2.3 GB |
 | accurate-4b (Qwen3.5-4B) | GPU, 2.8 GB VRAM | 1297 / 2852 | 248 | 79 | 4.7 GB |
 
@@ -242,7 +243,8 @@ Findings:
 - **Qwen3.5-2B is unreliable as the accurate tier:** on one page it translated the *context* page instead of the current one (all 7 bubbles wrong); on another it answered in Chinese even when retried per bubble; on a third it put the same 605-character run-on text into two bubbles. After an automatic per-bubble retry for untranslated output, ~6 of 89 bubbles were still wrong. 4B had none of these problems.
 - **Parallel slots help less than expected** (390 vs 522 ms/page) because pages average ~5 bubbles.
 - **llama-server's peak RAM is 1.7–4.7 GB even with the weights on the GPU** (it reads the whole file through memory while loading). On the target's shared-memory iGPU this matters: test `--no-mmap` there.
-- **Guards added:** the accurate tier retries any bubble whose output is mostly Chinese. Still missing: a check for merged or run-on outputs (output far longer than its source).
+- **Hy-MT2 with context (option 1) replaces 2B on the target.** It passed every automatic check (no leftover Chinese, no run-on outputs, nothing that matches the context better than its own bubble) and changed 59 of 89 bubbles versus plain quick: smoother phrasing, and better pronouns and names where the preceding text shows who is speaking. It's still more literal than 4B. It uses Tencent's documented contextual template, which explicitly says not to translate the preceding text.
+- **Guards added:** the Qwen accurate tier retries any bubble whose output is mostly Chinese. Still missing: a check for merged or run-on outputs (output far longer than its source); Hy-MT2's one-request-per-bubble design can't merge bubbles.
 - Not yet done: the benchmark on the target Yoga, Vulkan/SYCL/OpenVINO builds, and the sustained and battery passes.
 
 ### Phase 3: Server
@@ -287,8 +289,8 @@ Findings:
 ## Risks
 - Hy-MT2 GGUF may need a newer or patched llama.cpp for some quantizations. Use HY-MT1.5 as the fallback.
 - PP-OCR on stylized comic fonts and vertical Traditional text needs measuring; the Phase 1 benchmark decides.
-- **Free RAM on the target (~6.4 GB).** If Chrome plus the server exceed it, Windows swaps to the page file and a page can take minutes. Mitigations: the free-memory check that picks the 2B model, `--no-mmap` if weights are duplicated, and revoking off-screen page images.
-- On the target, even with the iGPU, the accurate tier with Qwen3.5-4B (~17–25 s per page) is slower than reading. The target therefore defaults to Qwen3.5-2B for that tier; if its quality is too poor, try Hy-MT2 with page context. The 4B model stays discrete-GPU-only.
+- **Free RAM on the target (~6.4 GB).** If Chrome plus the server exceed it, Windows swaps to the page file and a page can take minutes. Mitigations: the free-memory check that falls back from 4B to Hy-MT2, `--no-mmap` if weights are duplicated, and revoking off-screen page images.
+- On the target, even with the iGPU, the accurate tier with Qwen3.5-4B (~17–25 s per page) is slower than reading. The target therefore uses Hy-MT2 with context for that tier, which is more literal than 4B. The 4B model stays discrete-GPU-only.
 - Thermal throttling and battery: the 155H sustains ~28 W. Measured numbers may drop 15–25% after a few minutes of prefetching, and further on battery.
 - GPU fallback edge cases: VRAM too small for the model, or CUDA DLLs missing for CTranslate2. Each one must fall back to CPU cleanly rather than crash; Phase 2 tests this by forcing a GPU failure.
 - The site's markup or hotlink rules may change. Keep the site-specific selectors and Referer in one config object.

@@ -37,6 +37,7 @@ CONFIGS = {
     "very_quick": ("very_quick", None),
     "quick": ("quick", None),
     "quick-serial": ("quick", 1),
+    "accurate-hymt": ("accurate-hymt", None),
     "accurate-2b": ("accurate-2b", None),
     "accurate-4b": ("accurate", None),
 }

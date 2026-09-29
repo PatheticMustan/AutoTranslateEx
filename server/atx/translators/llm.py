@@ -21,6 +21,10 @@ from atx.llm_process import LlamaServer
 
 # Tencent's Chinese-language template (used when Chinese is the source or target).
 HY_MT_PROMPT = "将以下文本翻译为英语，注意只需要输出翻译后的结果，不要额外解释：\n\n{text}"
+# Tencent's contextual template: preceding text first, then "translate only the
+# text below, not the text above, without explanation".
+HY_MT_CONTEXT_PROMPT = "{context}\n参考上面的信息，把下面的文本翻译成英语，注意不需要翻译上文，也不要额外解释：\n{text}"
+HY_MT_CONTEXT_BUBBLES = 8  # how many preceding bubbles to show as context
 # Tencent's recommended sampling for the 1.8B model.
 HY_MT_SAMPLING = {"temperature": 0.7, "top_p": 0.6, "top_k": 20, "repeat_penalty": 1.05}
 
@@ -74,17 +78,30 @@ class _LlmTranslator:
 
 
 class HyMtTranslator(_LlmTranslator):
+    """One request per bubble. With use_context, each bubble also gets the text
+    before it (previous page, then earlier bubbles on this page) as context."""
+
     name = "quick"
+
+    def __init__(self, server: LlamaServer, use_context: bool = False):
+        super().__init__(server)
+        self.use_context = use_context
 
     def translate(self, texts: list[str], context: list[str] | None = None) -> list[str]:
         self.last_usage = []
+        preceding = list(context or [])
 
-        def one(text: str) -> str:
-            return self._chat([{"role": "user", "content": HY_MT_PROMPT.format(text=text)}],
-                              max_tokens=160, **HY_MT_SAMPLING)
+        def prompt(i: int) -> str:
+            before = (preceding + texts[:i])[-HY_MT_CONTEXT_BUBBLES:]
+            if self.use_context and before:
+                return HY_MT_CONTEXT_PROMPT.format(context="\n".join(before), text=texts[i])
+            return HY_MT_PROMPT.format(text=texts[i])
+
+        def one(i: int) -> str:
+            return self._chat([{"role": "user", "content": prompt(i)}], max_tokens=160, **HY_MT_SAMPLING)
 
         with ThreadPoolExecutor(max_workers=self.server.parallel) as pool:
-            return list(pool.map(one, texts))
+            return list(pool.map(one, range(len(texts))))
 
 
 class QwenPageTranslator(_LlmTranslator):
