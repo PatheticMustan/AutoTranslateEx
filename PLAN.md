@@ -226,6 +226,25 @@ Pages can print variant glyphs (e.g. the Japanese-style 説 for 說, common in m
 - Replace the estimated budget table with measured numbers, and save the fastest device per component as the target's default.
 - **Checkpoint:** you read the report and decide which tiers to keep, swap or retune.
 
+**Dev-machine results (2026-09-27; 17 pages, 89 bubbles from the default OCR; RTX 3070 Ti Laptop):**
+
+| Config | Ran on | ms/page (mean / p90) | ms/bubble | Gen tok/s | llama-server peak RAM |
+|---|---|---|---|---|---|
+| very_quick (opus-mt, int8) | CPU (CUDA unusable: no cuBLAS DLL) | 144 / 371 | 27 | — | 285 MB (in-process) |
+| quick (Hy-MT2-1.8B, `-np 8`) | GPU, 1.4 GB VRAM | 390 / 912 | 74 | 85 per request | 1.7 GB |
+| quick-serial (`-np 1`) | GPU, 1.2 GB VRAM | 522 / 1255 | 100 | 176 | 1.7 GB |
+| accurate-2b (Qwen3.5-2B) | GPU, 1.3 GB VRAM | 698 / 1563 | 133 | 160 | 2.3 GB |
+| accurate-4b (Qwen3.5-4B) | GPU, 2.8 GB VRAM | 1297 / 2852 | 248 | 79 | 4.7 GB |
+
+Findings:
+- **Everything runs.** Tencent's Hy-MT2 Q4_K_M loads on stock llama.cpp (the STQ kernel is only needed for their 1-bit files). Thinking is off for Qwen3.5 (one short JSON response per page).
+- **Quality (read by eye on a sample):** very quick is fine on short dialogue but drops clauses in long narration and invents Western names. Quick is complete and accurate but stiff. Accurate-4B is the most natural, with consistent names and idioms.
+- **Qwen3.5-2B is unreliable as the accurate tier:** on one page it translated the *context* page instead of the current one (all 7 bubbles wrong); on another it answered in Chinese even when retried per bubble; on a third it put the same 605-character run-on text into two bubbles. After an automatic per-bubble retry for untranslated output, ~6 of 89 bubbles were still wrong. 4B had none of these problems.
+- **Parallel slots help less than expected** (390 vs 522 ms/page) because pages average ~5 bubbles.
+- **llama-server's peak RAM is 1.7–4.7 GB even with the weights on the GPU** (it reads the whole file through memory while loading). On the target's shared-memory iGPU this matters: test `--no-mmap` there.
+- **Guards added:** the accurate tier retries any bubble whose output is mostly Chinese. Still missing: a check for merged or run-on outputs (output far longer than its source).
+- Not yet done: the benchmark on the target Yoga, Vulkan/SYCL/OpenVINO builds, and the sustained and battery passes.
+
 ### Phase 3: Server
 - `POST /translate`:
   - input: image bytes as multipart, plus `tier`;
