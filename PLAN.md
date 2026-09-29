@@ -157,6 +157,7 @@ server/
     fetch_samples.py # download sample pages into samples/ (with Referer)
     bench_ocr.py
     bench_mt.py      # side-by-side HTML report + latency/RAM table
+    smoke_server.py  # drive a running server like the extension does
   tests/
   models/  samples/  cache.db   # gitignored
 extension/
@@ -254,6 +255,39 @@ Findings:
 - `GET /health`: returns the loaded models, the current tier, and the device per component (GPU name or CPU, plus the fallback reason if there was one).
 - Load models once and keep them warm. OCR runs behind a lock. Results are cached by (image sha1, tier).
 - Cold-start and warm latency are logged for each request.
+
+**Built (2026-09-28):** `atx/app.py` (FastAPI), `atx/cache.py` (SQLite), and `Pipeline` in `atx/pipeline.py`. Run with `python -m atx.app [--tier quick] [--ocr-device auto|cpu|dml]`.
+
+API, which is what the extension codes against:
+
+| Endpoint | Input | Output |
+|---|---|---|
+| `POST /translate` | multipart: `image` (file), `tier`, optional `page_url`, `prev_url` | `{id, w, h, regions:[{box:[x0,y0,x1,y1], src, dst, vertical}], tier, cached, ms:{ocr, load, translate, total}, note}` |
+| `POST /warm` | form: `tier` | health, plus `load_ms`. The popup calls it when the tier changes, so the first page doesn't pay the load. |
+| `GET /health` | | `{ok, tiers, tier, resolved, note, loading, device, components:{ocr, very_quick, llm}, fallbacks, free_ram_mb}`. `device` is the one-line status for the popup. Answers immediately during startup (`ok: false, loading: "ocr"`). |
+| `DELETE /cache` | | clears all cached OCR and translations |
+
+How it works:
+- **Previous-page context:** the extension sends each page's URL and the previous page's URL. The server remembers each page's bubble text by URL, so the accurate tiers get the previous page as context. If the previous page is still being OCR'd (2 requests in flight), it waits up to 15 s for it. After a restart, the URL → image mapping comes from the cache.
+- **Caching:** OCR results and translations are cached separately, so switching tiers on a page skips OCR. Keys include the model names, the OCR config and `PIPELINE_VERSION`. Known gap: a page translated before its previous page was ready is cached without context.
+- **Tier switches:**
+  - Only one llama-server runs at a time, but quick and accurate-hymt share one (8 slots × 1024 tokens), so on the target switching between them costs nothing.
+  - Very quick (opus-mt, ~300 MB) stays loaded next to the LLM.
+  - The free-RAM check for Qwen3.5-4B (< 5 GB free → Hy-MT2 with context, reason in `note`) runs once per switch and is skipped when the 4B model is already loaded (it would count its own memory).
+- **Startup:** the OCR model and the startup tier load in a background thread. A `/translate` that arrives first waits.
+- **Concurrency:** one page translates at a time (the LLM tiers already batch a page's bubbles), while OCR of the next page overlaps it.
+- **OCR device:** `auto` means DirectML on a discrete GPU and CPU otherwise, following the Compute-device table. A DirectML failure on the warm-up run falls back to CPU and is recorded.
+- **Process safety:** llama-server runs in a Windows job object that kills it when the Python server exits, even on a crash or a closed console window. An orphan would keep its VRAM and port 8766.
+
+**Dev-machine results (20 sample pages, 2 requests in flight, as the extension will send them; `python -m bench.smoke_server`):**
+
+| Tier | Throughput | Round trip per page (mean / max) | Notes |
+|---|---|---|---|
+| Startup (OCR on DirectML + Hy-MT2 on CUDA) | ready in ~5 s | | |
+| quick, cold cache | 395 ms/page | 763 / 2687 ms | OCR 50–290 ms per page. The max is long narration in chapter 624353. |
+| accurate (Qwen3.5-4B), after a 3.6 s switch | 871 ms/page | 1639 / 6016 ms | 15 new pages + 5 cached; OCR from cache |
+| very_quick, OCR cached | 205 ms/page | 392 / 1365 ms | |
+| any tier, cached result | ~1 ms on the server | | |
 
 ### Phase 4: Extension
 - **manifest:**

@@ -9,6 +9,7 @@ from __future__ import annotations
 import atexit
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -19,6 +20,38 @@ from atx.models import MODELS_DIR, gguf_path, llama_server_exe
 
 LOG = MODELS_DIR / "llama-server.log"
 START_TIMEOUT_S = 180
+
+_job = None  # Windows job object holding every llama-server we start
+
+
+def _kill_with_parent(proc: subprocess.Popen) -> None:
+    """Put the process in a job that Windows kills when this Python process exits.
+
+    atexit doesn't run if the console window is closed or Python crashes, and an
+    orphaned llama-server keeps its VRAM and port (the next start would then
+    talk to the old one).
+    """
+    global _job
+    if sys.platform != "win32":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if _job is None:
+        class LimitInfo(ctypes.Structure):  # JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+            _fields_ = [("basic", ctypes.c_byte * (64 if ctypes.sizeof(ctypes.c_void_p) == 8 else 48)),
+                        ("io", ctypes.c_byte * 48), ("sizes", ctypes.c_size_t * 4)]
+
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        job = k32.CreateJobObjectW(None, None)
+        info = LimitInfo()
+        # BasicLimitInformation.LimitFlags sits at offset 16 on both 32- and 64-bit.
+        ctypes.c_uint32.from_buffer(info.basic, 16).value = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not k32.SetInformationJobObject(wintypes.HANDLE(job), 9, ctypes.byref(info), ctypes.sizeof(info)):
+            return  # 9 = JobObjectExtendedLimitInformation
+        _job = job
+    k32.AssignProcessToJobObject(wintypes.HANDLE(_job), wintypes.HANDLE(int(proc._handle)))
 
 
 class LlamaServer:
@@ -64,6 +97,7 @@ class LlamaServer:
         log = LOG.open("w", encoding="utf-8")
         self._proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
                                       creationflags=subprocess.CREATE_NO_WINDOW)
+        _kill_with_parent(self._proc)
         while time.perf_counter() - t0 < START_TIMEOUT_S:
             if self._proc.poll() is not None:
                 raise RuntimeError(f"exited with code {self._proc.returncode} (see {LOG})")
@@ -90,6 +124,10 @@ class LlamaServer:
     @property
     def pid(self) -> int | None:
         return self._proc.pid if self._proc else None
+
+    @property
+    def alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
 
     def stop(self) -> None:
         if self._proc and self._proc.poll() is None:

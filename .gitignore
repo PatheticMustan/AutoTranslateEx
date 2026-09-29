@@ -7,6 +7,6 @@ __pycache__/
 # Large or local-only data
 server/models/
 server/samples/
-server/cache.db
+server/cache.db*
 server/bench/report*.html
 server/bench/out/
