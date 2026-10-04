@@ -157,6 +157,7 @@ server/
     fetch_samples.py # download sample pages into samples/ (with Referer)
     bench_ocr.py
     bench_mt.py      # side-by-side HTML report + latency/RAM table
+    bench_quant.py   # Hy-MT2 quantizations: chrF vs reference, speed
     smoke_server.py  # drive a running server like the extension does
   tests/
   models/  samples/  cache.db   # gitignored
@@ -248,6 +249,39 @@ Findings:
 - **Guards added:** the Qwen accurate tier retries any bubble whose output is mostly Chinese. Still missing: a check for merged or run-on outputs (output far longer than its source); Hy-MT2's one-request-per-bubble design can't merge bubbles.
 - Not yet done: the benchmark on the target Yoga, Vulkan/SYCL/OpenVINO builds, and the sustained and battery passes.
 
+### Phase 2b: Hy-MT2 quantizations (for a smaller, single-tier install)
+Question: if the install kept only Hy-MT2 with context, how small can the model get? `python -m bench.bench_quant --cpu`:
+- Hy-MT2 with context, 8 slots, **greedy decoding**, so differences come from quantization rather than sampling;
+- quality is chrF (0–100) on 82 scored bubbles against reference English written by Claude (`samples/mt_truth.json`), and against the Q8_0 output.
+
+**Results (dev machine, 2026-09-28; 17 pages; CPU = llama.cpp CPU build, 6 threads):**
+
+| Quant | File | chrF vs ref | chrF vs Q8 | Chinese / run-on outputs | GPU ms/page | CPU ms/page (p90) | llama-server peak RAM |
+|---|---|---|---|---|---|---|---|
+| Q8_0 (Tencent) | 1820 MB | 50.3 | 100 | 0 / 1 | 652 | 8733 (23806) | 2.9 GB |
+| **Q4_K_M (Tencent, current)** | **1081 MB** | **48.6** | 71.9 | 0 / 0 | 563 | **5344 (14104)** | 2.2 GB |
+| IQ4_XS | 986 MB | 49.9 | 68.7 | 0 / 0 | 541 | 6033 (16884) | 2.1 GB |
+| Q3_K_M | 907 MB | 46.3 | 67.0 | 0 / 1 | 655 | 5266 (14703) | 2.1 GB |
+| IQ3_XXS | 733 MB | 46.3 | 58.7 | 0 / 1 | 508 | 6243 (15707) | 1.9 GB |
+| Q2_K | 741 MB | 41.8 | 53.9 | 3 / 4 | 654 | 5549 (13890) | 1.9 GB |
+| IQ2_M | 666 MB | 37.3 | 43.5 | 2 / 13 | 1001 | 8270 (17854) | 1.9 GB |
+
+Findings:
+- **Keep Q4_K_M.**
+  - Q8_0, Q4_K_M and IQ4_XS are within run-to-run noise of each other (Q4_K_M scored 49.0 and 48.6 on two runs).
+  - IQ4_XS saves only ~95 MB and is slower on CPU.
+  - The 3-bit quants lose ~3–4 points, with visible meaning errors (IQ3_XXS: 大溪地 "Tahiti" → "Gulf of Thailand"; 人言可畏 "gossip is scary" → "words can be trusted").
+  - The 2-bit quants are broken: leftover Chinese, and outputs that include the context.
+- **IQ quants are slower than K quants on CPU** (IQ3_XXS: 7 tok/s vs 12 for Q4_K_M), so the smaller file doesn't buy speed.
+- **Tencent's own 2-bit (573 MB) and 1.25-bit (440 MB) GGUFs aren't usable.**
+  - They need unmerged llama.cpp PRs ([#19357](https://github.com/ggml-org/llama.cpp/pull/19357), [#22836](https://github.com/ggml-org/llama.cpp/pull/22836)).
+  - The kernels are CPU-only and optimized for ARM, so there's no Vulkan offload on the Yoga and only a slow generic path on x86.
+  - Their "1.5× faster" claim is for ARM devices.
+- **mradermacher's re-quantized GGUFs have a wrong end-of-sequence token** (id 3, `$`, instead of 120020), so generation never stopped. `atx/models.py` fixes it with `--override-kv` per model.
+- **Single-tier install floor:** ~1.3 GB with the current architecture (Hy-MT2 Q4_K_M, llama.cpp Vulkan and CPU builds, Python packages, OCR models), or ~1.15 GB without Python (OCR in the browser).
+- **CPU speed concern for the target:** Q4_K_M on 6 CPU threads is ~5.3 s/page (p90 14 s) on the dev i9, over the ≤ 5 s CPU-only budget. The Yoga should run it on the iGPU; this is only the fallback. Measure on the Yoga.
+- **New failure found: context leak.** With greedy decoding, even Q8_0 sometimes answers a lone sound effect (嗶, "beep") with a translation of the *preceding bubbles* instead. The Phase 2 run with Tencent's sampling didn't show it, but that doesn't rule it out. Guard to add: if a short bubble's output is far longer than its source, retry it without context.
+
 ### Phase 3: Server
 - `POST /translate`:
   - input: image bytes as multipart, plus `tier`;
@@ -317,7 +351,7 @@ How it works:
 ### Phase 5: Experiments (pick based on results)
 - **Bubble detector:** fine-tune YOLO26n, using the ogkalu model to auto-label pages, then compare grouping accuracy and fill quality against the heuristic.
 - **Run OCR in the browser** (onnxruntime-web), so the server only translates.
-- **Speed:** smaller quants (Hy-MT 2-bit / 1.25-bit), speculative prefetch of the next chapter, reusing the llama.cpp prompt cache for the accurate tier.
+- **Speed:** smaller quants (tested in Phase 2b: nothing below Q4 is worth it), speculative prefetch of the next chapter, reusing the llama.cpp prompt cache for the accurate tier.
 - **Better fill:** use the bubble mask from the detector instead of a rectangle.
 
 ## Risks

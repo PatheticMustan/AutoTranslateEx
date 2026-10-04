@@ -1,6 +1,6 @@
 """Download translation models and llama.cpp builds into server/models/.
 
-    python -m atx.models                 # everything this machine needs
+    python -m atx.models                 # what this machine needs (no benchmark-only models)
     python -m atx.models qwen3.5-4b      # specific entries
     python -m atx.models --list
 
@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import sys
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -38,6 +38,8 @@ LLAMA_BUILDS = {
 class HfModel:
     repo: str
     files: list[str]
+    # llama-server --override-kv fixes for broken metadata, e.g. "tokenizer.ggml.eos_token_id=int:120020"
+    override_kv: list[str] = field(default_factory=list)
 
     def urls(self) -> list[tuple[str, str]]:
         return [(f"https://huggingface.co/{self.repo}/resolve/main/{f}", f) for f in self.files]
@@ -53,6 +55,24 @@ MODELS: dict[str, HfModel] = {
     "qwen3.5-2b": HfModel("unsloth/Qwen3.5-2B-GGUF", ["Qwen3.5-2B-Q4_K_M.gguf"]),
     "qwen3.5-4b": HfModel("unsloth/Qwen3.5-4B-GGUF", ["Qwen3.5-4B-Q4_K_M.gguf"]),
 }
+
+# Other quantizations of Hy-MT2-1.8B, for bench.bench_quant only (never downloaded
+# by default). Q8_0 is the near-lossless reference; the rest are importance-matrix
+# quants in standard formats, which stock llama.cpp runs on every backend.
+# Tencent's own 2-bit and 1.25-bit files need unmerged, CPU-only (ARM-optimized)
+# kernels, so they're left out.
+# mradermacher's files set eos_token_id to 3 ("$") instead of Tencent's 120020, so
+# generation never stops (the answer, then rambling until max_tokens).
+_I1 = "mradermacher/Hy-MT2-1.8B-i1-GGUF"
+_I1_FIX = ["tokenizer.ggml.eos_token_id=int:120020"]
+HY_MT_QUANTS: dict[str, HfModel] = {
+    "hy-mt2-1.8b-q8_0": HfModel("tencent/Hy-MT2-1.8B-GGUF", ["Hy-MT2-1.8B-Q8_0.gguf"]),
+    **{f"hy-mt2-1.8b-{q.lower()}": HfModel(_I1, [f"Hy-MT2-1.8B.i1-{q}.gguf"], _I1_FIX)
+       for q in ["IQ4_XS", "Q3_K_M", "IQ3_XXS", "Q2_K", "IQ2_M"]},
+}
+MODELS.update(HY_MT_QUANTS)
+DISCRETE_ONLY = {"qwen3.5-4b"}   # the accurate tier uses it only on a discrete GPU
+BENCH_ONLY = {"qwen3.5-2b", *HY_MT_QUANTS}
 
 
 def model_path(name: str) -> Path:
@@ -110,7 +130,10 @@ def default_targets() -> tuple[list[str], list[str]]:
     builds = [device.detect().llama_build]
     if builds[0] != "cpu":
         builds.append("cpu")  # always have a CPU fallback build
-    return list(MODELS), builds
+    gpu = device.detect().primary_gpu
+    discrete = gpu is not None and gpu.vendor in ("nvidia", "amd")
+    skip = BENCH_ONLY | (set() if discrete else DISCRETE_ONLY)
+    return [m for m in MODELS if m not in skip], builds
 
 
 def main() -> None:

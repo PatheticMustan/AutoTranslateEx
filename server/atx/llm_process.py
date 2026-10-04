@@ -16,7 +16,7 @@ from pathlib import Path
 import httpx
 
 from atx import device as devmod
-from atx.models import MODELS_DIR, gguf_path, llama_server_exe
+from atx.models import MODELS, MODELS_DIR, gguf_path, llama_server_exe
 
 LOG = MODELS_DIR / "llama-server.log"
 START_TIMEOUT_S = 180
@@ -69,8 +69,9 @@ class LlamaServer:
         self._proc: subprocess.Popen | None = None
         atexit.register(self.stop)
 
-    def start(self) -> None:
-        build = devmod.detect().llama_build
+    def start(self, cpu: bool = False) -> None:
+        """cpu=True skips the GPU build (for benchmarking the CPU path)."""
+        build = "cpu" if cpu else devmod.detect().llama_build
         if build != "cpu":
             try:
                 self._launch(build, gpu_layers=99)
@@ -93,6 +94,8 @@ class LlamaServer:
             "-t", str(self.threads), "--no-webui", "--jinja",
             "-lv", "4",  # the default level doesn't log which device holds the model
         ]
+        for kv in MODELS[self.model].override_kv:
+            cmd += ["--override-kv", kv]
         t0 = time.perf_counter()
         log = LOG.open("w", encoding="utf-8")
         self._proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,

@@ -83,9 +83,10 @@ class HyMtTranslator(_LlmTranslator):
 
     name = "quick"
 
-    def __init__(self, server: LlamaServer, use_context: bool = False):
+    def __init__(self, server: LlamaServer, use_context: bool = False, sampling: dict | None = None):
         super().__init__(server)
         self.use_context = use_context
+        self.sampling = HY_MT_SAMPLING if sampling is None else sampling
 
     def translate(self, texts: list[str], context: list[str] | None = None) -> list[str]:
         self.last_usage = []
@@ -98,7 +99,7 @@ class HyMtTranslator(_LlmTranslator):
             return HY_MT_PROMPT.format(text=texts[i])
 
         def one(i: int) -> str:
-            return self._chat([{"role": "user", "content": prompt(i)}], max_tokens=160, **HY_MT_SAMPLING)
+            return self._chat([{"role": "user", "content": prompt(i)}], max_tokens=160, **self.sampling)
 
         with ThreadPoolExecutor(max_workers=self.server.parallel) as pool:
             return list(pool.map(one, range(len(texts))))
