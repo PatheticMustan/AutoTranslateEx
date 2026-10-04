@@ -12,7 +12,10 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
   const RING = 4; // px of the band sampled for the fill color
   const MAX_DIRTY = 0.01; // share of non-bubble pixels allowed inside the text rectangle
 
-  ATX.render = async function render(imageB64, type, result) {
+  // -> {blob, areas}: the rendered page, and per region (by index into
+  // result.regions) the area it covers on the page, for hit-testing clicks.
+  // opts.highlight marks bubbles the server flagged as possibly wrong.
+  ATX.render = async function render(imageB64, type, result, opts = {}) {
     const blob = await (await fetch(`data:${type};base64,${imageB64}`)).blob();
     const bmp = await createImageBitmap(blob);
     const canvas = document.createElement("canvas");
@@ -22,21 +25,45 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
     ctx.drawImage(bmp, 0, 0);
     bmp.close();
 
-    const regions = result.regions.filter((r) => r.dst && r.dst.trim() && r.dst !== r.src);
+    const shown = result.regions.map((r, i) => ({ r, i })).filter(({ r }) => r.dst && r.dst.trim() && r.dst !== r.src);
+    const regions = shown.map(({ r }) => r);
     // Sample every fill first: a box drawn earlier could cover a later one's band.
     const boxes = regions.map((r) => padded(r.box, canvas));
     const fills = boxes.map((b) => bandMedian(ctx, b, canvas));
     // Text may spread into empty bubble around its box, but never into another
     // region's box or a text area already placed.
     const placed = [];
+    const areas = {};
     regions.forEach((r, i) => {
       const neighbours = boxes.filter((_, j) => j !== i).map((b) => halfGap(boxes[i], b));
-      placed.push(drawRegion(ctx, r, fills[i], canvas, [...neighbours, ...placed]));
+      const snug = drawRegion(ctx, r, fills[i], canvas, [...neighbours, ...placed]);
+      placed.push(snug);
+      const b = boxes[i];
+      areas[shown[i].i] = [Math.min(b[0], snug[0]), Math.min(b[1], snug[1]), Math.max(b[2], snug[2]), Math.max(b[3], snug[3])];
+      if (opts.highlight && r.flagged) drawBadge(ctx, snug, canvas);
     });
     // toBlob / convertToBlob encode in idle time and took a flat ~1 s per page;
     // the synchronous toDataURL takes ~20 ms.
-    return (await fetch(canvas.toDataURL("image/jpeg", 0.92))).blob();
+    return { blob: await (await fetch(canvas.toDataURL("image/jpeg", 0.92))).blob(), areas };
   };
+
+  // A small amber "?" on the top-right corner of a text box: "this one may be wrong".
+  function drawBadge(ctx, [x0, y0, x1], canvas) {
+    const r = Math.max(9, Math.round(canvas.width * 0.016));
+    const cx = Math.min(canvas.width - r - 1, x1), cy = Math.max(r + 1, y0);
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = "#f2a516";
+    ctx.fill();
+    ctx.lineWidth = Math.max(1.5, r / 6);
+    ctx.strokeStyle = "#fff";
+    ctx.stroke();
+    ctx.fillStyle = "#1b1b1b";
+    ctx.font = `700 ${Math.round(r * 1.35)}px "Segoe UI", sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("?", cx, cy + r * 0.08);
+  }
 
   ATX.renderInternals = { bandMedian, layout, padded }; // for dev/harness.html debugging
 

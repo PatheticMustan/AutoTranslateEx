@@ -22,6 +22,9 @@ async function init() {
     await chrome.storage.local.set({ enabled: settings.enabled });
   });
   $("original").addEventListener("click", async () => showPage(await toTab({ type: "toggleOriginal" })));
+  $("highlight").checked = settings.highlight;
+  $("highlight").addEventListener("change", (e) => chrome.storage.local.set({ highlight: e.target.checked }));
+  $("retranslate").addEventListener("click", async () => showPage(await toTab({ type: "retranslateFlagged" })));
   $("copy-urls").addEventListener("click", copyUrls);
 
   refresh();
@@ -89,6 +92,34 @@ function showPage(s) {
   $("original").setAttribute("aria-pressed", String(s.showOriginal));
   $("original").textContent = s.showOriginal ? "Show translation" : "Show original";
   $("page-error").textContent = s.errors ? `${s.errors} failed: ${s.lastError || ""}` : "";
+  $("retranslate").hidden = !s.flaggedHere;
+  $("retranslate").textContent = `Retranslate ${s.flaggedHere} uncertain`;
+  $("retranslate").title = "Redo this page's uncertain bubbles with the Accurate tier";
+  if (s.series && s.series !== namesFor) loadNames(s.series);
+}
+
+// ---- name bank ---------------------------------------------------------------
+let namesFor = null;
+
+async function loadNames(series) {
+  namesFor = series;
+  const res = await chrome.runtime.sendMessage({ type: "names", series }).catch(() => null);
+  if (!res || res.error) return;
+  const active = res.names.filter((n) => n.en && (n.user_set || n.pages >= 2));
+  $("names-section").hidden = !active.length;
+  $("names-count").textContent = `(${active.length})`;
+  $("names").replaceChildren(...active.flatMap((n) => {
+    const zh = Object.assign(document.createElement("span"), { className: "zh", textContent: n.zh });
+    const input = Object.assign(document.createElement("input"), { value: n.en, title: "English spelling" });
+    input.addEventListener("change", () =>
+      chrome.runtime.sendMessage({ type: "setName", series, zh: n.zh, en: input.value.trim() || null })
+        .then(() => loadNames(series)));
+    const pages = Object.assign(document.createElement("span"), {
+      className: "n", textContent: n.user_set ? "set" : `${n.pages} p.`,
+      title: n.user_set ? "Spelling set by you" : `Seen on ${n.pages} pages`,
+    });
+    return [zh, input, pages];
+  }));
 }
 
 // Message the content script in the active tab; null when it isn't a chapter page.

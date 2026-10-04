@@ -26,8 +26,11 @@ CJK_ONLY = re.compile(r"^[㐀-䶿一-鿿豈-﫿]{2,4}$")
 SURNAMES = set(
     "王李張劉陳楊黃趙吳周徐孫馬朱胡郭何高林羅鄭梁謝宋唐許韓馮鄧曹彭曾蕭田董袁潘于蔣蔡余杜葉程蘇魏呂丁任沈"
     "姚盧姜崔鍾譚陸汪范金石廖賈夏韋付方白鄒孟熊秦邱江尹薛閻段雷侯龍史陶黎賀顧毛郝龔邵萬錢嚴覃武戴莫孔向湯"
-    "柯池宮花游簡溫藍連施洪溫柳殷莊")
+    "柯池宮花游簡溫藍連施洪溫柳殷莊利里靳")
 NICKNAME_PREFIXES = {"小": "Xiao", "阿": "A", "老": "Lao"}
+TITLE_SUFFIXES = {"叔": "Uncle", "伯": "Uncle", "姨": "Auntie"}  # 森叔 -> Uncle Sen
+# Characters that start a phrase, not a name: segmentation leftovers like 了黎.
+PARTICLES = set("了的是在和跟把被給對讓叫說找向與也都就還又這那你我他她")
 # Words jieba often tags as names that aren't (honorifics, common words).
 NOT_NAMES = {"學姐", "學長", "學妹", "學弟", "老師", "同學", "社長", "會長", "姐姐", "哥哥", "妹妹", "弟弟",
              "媽媽", "爸爸", "大家", "小姐", "先生", "老大", "小鬼", "阿姨"}
@@ -53,9 +56,31 @@ def find_names(text: str) -> list[str]:
     for word, flag in posseg.cut(simple):
         original = text[pos:pos + len(word)]
         pos += len(word)
-        if flag in NAME_TAGS and CJK_ONLY.match(original) and original not in NOT_NAMES:
+        # jieba's name tag also lands on ordinary words (谢谢 "thanks", 明白
+        # "understand"); those are in its dictionary, while real character names
+        # aren't, so only out-of-vocabulary "names" count.
+        if flag in NAME_TAGS and CJK_ONLY.match(original) and original not in NOT_NAMES                 and original[0] not in PARTICLES and not _dictionary_word(word):
             out.append(original)
     return out
+
+
+def _common_word(text: str) -> bool:
+    """A word the model would also capitalize without it being a name: an
+    interjection (哈哈 "Haha", 叮咚 "Ding dong") or a frequent word (利亞, which
+    the model writes "Liya" for 利亞繪). Rare dictionary nouns stay: nicknames
+    like 花花 are in the dictionary too."""
+    import jieba
+
+    _, t2s = _tools()
+    simplified = t2s.convert(text)
+    tag = jieba.posseg.dt.word_tag_tab.get(simplified)
+    return (jieba.dt.FREQ.get(simplified) or 0) >= 50 or (tag is not None and not tag.startswith("n"))
+
+
+def _dictionary_word(simplified: str) -> bool:
+    import jieba
+
+    return bool(jieba.dt.FREQ.get(simplified)) or simplified in jieba.posseg.dt.word_tag_tab
 
 
 CAPITALIZED_RUN = re.compile(r"\b[A-Z][a-z]*(?:[ -][A-Z][a-z]*)*\b")
@@ -81,7 +106,7 @@ def names_from_translation(src: str, dst: str) -> list[str]:
         for i in range(len(src) - n + 1):
             chunk = src[i:i + n]
             if CJK_ONLY.match(chunk) and chunk not in NOT_NAMES \
-                    and "".join(lazy_pinyin(chunk, style=Style.NORMAL)) in want:
+                    and "".join(lazy_pinyin(chunk, style=Style.NORMAL)) in want and not _common_word(chunk):
                 found.append(chunk)
     # A shorter match inside a longer one (玥 in 黎玥) is the same name.
     return [f for f in found if not any(f != g and f in g for g in found)]
@@ -91,6 +116,8 @@ def romanize(name: str) -> str:
     from pypinyin import Style, lazy_pinyin
 
     syl = lazy_pinyin(name, style=Style.NORMAL)
+    if name[-1] in TITLE_SUFFIXES and len(name) >= 2:
+        return f"{TITLE_SUFFIXES[name[-1]]} {romanize(name[:-1]) if len(name) > 2 else syl[0].capitalize()}"
     if name[0] in NICKNAME_PREFIXES and len(name) >= 2:
         return f"{NICKNAME_PREFIXES[name[0]]} {''.join(syl[1:]).capitalize()}"
     if name[0] in SURNAMES and len(name) >= 2:

@@ -5,7 +5,7 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
 ATX.api = {
   // Fetch a page image, send it to the server, and return the translation with
   // the image bytes (base64), which the content script needs to draw on.
-  async translate({ url, prevUrl, tier }) {
+  async translate({ url, prevUrl, tier, series }) {
     const img = await fetch(url, { credentials: "omit" });
     if (!img.ok) throw new Error(`image ${img.status} for ${url}`);
     const type = img.headers.get("content-type") || "image/jpeg";
@@ -16,9 +16,37 @@ ATX.api = {
     form.append("tier", tier);
     form.append("page_url", url);
     if (prevUrl) form.append("prev_url", prevUrl);
+    if (series) form.append("series", series);
     const res = await fetch(`${ATX.config.server}/translate`, { method: "POST", body: form });
     if (!res.ok) throw new Error(`server ${res.status}: ${await res.text()}`);
     return { result: await res.json(), image: toBase64(bytes), type };
+  },
+
+  // Redo some bubbles of a translated page with the accurate tier.
+  async retranslate({ id, tier, indices, series, prevUrl }) {
+    const form = new FormData();
+    form.append("id", id);
+    form.append("tier", tier);
+    form.append("indices", indices.join(","));
+    if (series) form.append("series", series);
+    if (prevUrl) form.append("prev_url", prevUrl);
+    const res = await fetch(`${ATX.config.server}/retranslate`, { method: "POST", body: form });
+    if (!res.ok) throw new Error(`server ${res.status}: ${await res.text()}`);
+    return { result: await res.json() };
+  },
+
+  async names(series) {
+    const res = await fetch(`${ATX.config.server}/names?series=${encodeURIComponent(series)}`);
+    return res.json();
+  },
+
+  async setName({ series, zh, en }) {
+    const form = new FormData();
+    form.append("series", series);
+    form.append("zh", zh);
+    if (en) form.append("en", en);
+    const res = await fetch(`${ATX.config.server}/names`, { method: "POST", body: form });
+    return res.json();
   },
 
   async health() {

@@ -29,6 +29,9 @@ const handlers = {
     await ruleReady;
     return ATX.api.translate(msg);
   },
+  retranslate: (msg) => ATX.api.retranslate(msg),
+  names: (msg) => ATX.api.names(msg.series),
+  setName: (msg) => ATX.api.setName(msg),
   health: () => ATX.api.health(),
   warm: (msg) => ATX.api.warm(msg.tier),
 };

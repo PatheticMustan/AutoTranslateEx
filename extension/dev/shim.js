@@ -11,6 +11,7 @@
       async sendMessage(msg) {
         try {
           if (msg.type === "translate") return await ATX.api.translate(msg);
+          if (msg.type === "retranslate") return await ATX.api.retranslate(msg);
           if (msg.type === "health") return await ATX.api.health();
           if (msg.type === "warm") return await ATX.api.warm(msg.tier);
         } catch (e) {

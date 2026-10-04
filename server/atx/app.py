@@ -7,6 +7,8 @@ POST /translate  multipart: image (file), tier, page_url?, prev_url?, series?
                      tier, cached, ms: {ocr, load, translate, total}, note}
                  page_url/prev_url let the accurate tier use the previous page as context.
 POST /warm       form: tier. Loads that tier's model now (the popup calls it on a tier change).
+POST /retranslate form: id (page sha1), tier, indices ("0,3"), series?, prev_url?: redo bubbles
+                 with the accurate tier.
 GET  /names      ?series=: the series' name bank. POST /names (series, zh, en?) fixes or removes one.
 GET  /health     tiers, current tier, device per component, fallback reasons, free RAM.
 DELETE /cache    forget all cached OCR and translations.
@@ -110,6 +112,18 @@ def warm(tier: str = Form(...)) -> dict:
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     return {**pipeline.health(), "load_ms": round(load_s * 1000)}
+
+
+@app.post("/retranslate")
+def retranslate(id: str = Form(...), tier: str = Form(...), indices: str = Form(...),
+                series: str | None = Form(None), prev_url: str | None = Form(None)) -> dict:
+    """Redo bubbles (comma-separated indices) of a translated page with the
+    accurate tier; returns {id, regions: {index: region}} for just those."""
+    try:
+        idx = [int(i) for i in indices.split(",") if i.strip()]
+        return _pipeline().retranslate(id, tier, idx, series or None, prev_url or None)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @app.get("/names")

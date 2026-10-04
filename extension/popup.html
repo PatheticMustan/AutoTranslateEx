@@ -31,8 +31,18 @@
       <span id="progress"></span>
       <button id="original" type="button">Show original</button>
     </div>
+    <div class="row between uncertain">
+      <label class="check"><input type="checkbox" id="highlight"> Highlight uncertain text</label>
+      <button id="retranslate" type="button" hidden>Fix 0</button>
+    </div>
     <div class="sub error" id="page-error"></div>
   </section>
+
+  <details id="names-section" hidden>
+    <summary>Names <span id="names-count"></span></summary>
+    <p class="hint">Found in this series and spelled the same on every page. Edit a spelling, or clear it to stop using the name.</p>
+    <div id="names"></div>
+  </details>
 
   <details>
     <summary>Developer</summary>

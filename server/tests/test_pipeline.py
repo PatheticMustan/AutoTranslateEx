@@ -209,3 +209,30 @@ def test_regions_carry_confidence_and_flags(p):
     assert r["regions"][0]["confidence"] == {"mean": -0.1, "min": -0.5}
     # The fake translator echoes the Chinese back: a broken output is always flagged.
     assert r["regions"][0]["flagged"] is True
+
+
+def test_retranslate_replaces_only_the_chosen_bubbles(p):
+    class Better(FakeTranslator):
+        def translate(self, texts, context=None, glossary=None):
+            self.last_scores = [{"mean": -0.01, "min": -0.1} for _ in texts]
+            return [f"BETTER:{i}" for i, _ in enumerate(texts)]
+
+    r = p.translate(png(255), "quick")
+    better = Better()
+    p._translator = lambda impl: (better if impl != "quick" else p.fake, 0.0)
+    out = p.retranslate(r["id"], "quick", [0])
+    assert list(out["regions"]) == [0]
+    assert out["regions"][0]["dst"] == "BETTER:0" and out["regions"][0]["by"] != "quick"
+    # The page's cached result for its own tier now has the better text.
+    assert p.translate(png(255), "quick")["regions"][0]["dst"] == "BETTER:0"
+    with pytest.raises(ValueError):
+        p.retranslate("0" * 40, "quick", [0])
+
+
+def test_retranslate_works_after_the_name_bank_moved_the_cache_key(p, monkeypatch):
+    from atx import names
+    monkeypatch.setattr(names, "find_names", lambda text: ["右邊"] if "右邊" in text else [])
+    r = p.translate(png(255), "quick", series="s1")
+    p.translate(png(200), "quick", series="s1")  # now 右邊 is in the bank: page one's key changed
+    out = p.retranslate(r["id"], "quick", [0], series="s1")
+    assert out["regions"][0]["src"] == r["regions"][0]["src"]

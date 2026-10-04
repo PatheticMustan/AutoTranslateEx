@@ -18,9 +18,18 @@
   }));
   if (!pages.length) return;
 
+  // The series id, for the server's per-series name bank: from the "back to the
+  // table of contents" link.
+  const series = (() => {
+    const back = [...document.querySelectorAll('a[href*="/comics/"]')]
+      .find((a) => a.textContent.trim() === "返回目錄") || document.querySelector('a[href*="/comics/"]');
+    return back?.href.match(/\/comics\/(\d+)/)?.[1] || null;
+  })();
+
   const state = {
     enabled: C.defaults.enabled,
     tier: C.defaults.tier,
+    highlight: C.defaults.highlight,
     showOriginal: false,
     current: 0,
     inFlight: 0,
@@ -54,6 +63,30 @@
     p.img.dataset.atxPage = String(p.i);
     io.observe(p.img);
     mo.observe(p.img, { attributes: true, attributeFilter: ["src"] });
+    p.img.addEventListener("mousemove", (e) => {
+      const hit = flaggedAt(p, e);
+      p.img.style.cursor = hit === null ? "" : "pointer";
+      p.img.title = hit === null ? "" : "This translation may be wrong. Click to retranslate it with Accurate.";
+    });
+    p.img.addEventListener("click", (e) => {
+      const hit = flaggedAt(p, e);
+      if (hit === null) return;
+      e.preventDefault();
+      e.stopPropagation();
+      retranslate(p, [hit]);
+    }, true);
+  }
+
+  // The flagged region under the pointer, by index, or null.
+  function flaggedAt(p, e) {
+    if (!shouldShow(p) || !state.highlight || !p.areas) return null;
+    const rect = p.img.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (p.img.naturalWidth / rect.width);
+    const y = (e.clientY - rect.top) * (p.img.naturalHeight / rect.height);
+    for (const [i, [x0, y0, x1, y1]] of Object.entries(p.areas)) {
+      if (p.result.regions[i].flagged && x >= x0 && x <= x1 && y >= y0 && y <= y1) return Number(i);
+    }
+    return null;
   }
 
   // ---- queue ----------------------------------------------------------------
@@ -72,12 +105,15 @@
     const gen = state.generation;
     try {
       const resp = await chrome.runtime.sendMessage({
-        type: "translate", url: p.url, prevUrl: pages[p.i - 1]?.url, tier: state.tier,
+        type: "translate", url: p.url, prevUrl: pages[p.i - 1]?.url, tier: state.tier, series,
       });
       if (!resp || resp.error) throw new Error(resp?.error || "no response from the extension");
-      const blob = await ATX.render(resp.image, resp.type, resp.result);
+      // Keep the original and the result, to redraw after a retranslation.
+      Object.assign(p, { image: resp.image, type: resp.type, result: resp.result });
+      const { blob, areas } = await ATX.render(resp.image, resp.type, resp.result, { highlight: state.highlight });
       if (gen !== state.generation) return;
       p.blobUrl = URL.createObjectURL(blob);
+      p.areas = areas;
       p.status = "done";
       state.lastError = null;
       state.ms.push(resp.result.ms?.total ?? 0);
@@ -113,9 +149,42 @@
   function forget(p) {
     restore(p);
     if (p.blobUrl) URL.revokeObjectURL(p.blobUrl);
-    p.blobUrl = null;
-    p.status = "idle";
+    Object.assign(p, { blobUrl: null, image: null, result: null, areas: null, status: "idle" });
   }
+
+  // Draw a page again from its original (after a retranslation or a highlight toggle).
+  async function redraw(p) {
+    if (!p.image) return;
+    const { blob, areas } = await ATX.render(p.image, p.type, p.result, { highlight: state.highlight });
+    const old = p.blobUrl;
+    p.blobUrl = URL.createObjectURL(blob);
+    p.areas = areas;
+    apply(p);
+    if (old) URL.revokeObjectURL(old);
+  }
+
+  // Redo bubbles with the accurate tier; the server updates its cached page.
+  async function retranslate(p, indices) {
+    if (!p.result || !indices.length || p.retranslating) return;
+    p.retranslating = true;
+    p.img.style.cursor = "progress";
+    try {
+      const resp = await chrome.runtime.sendMessage({
+        type: "retranslate", id: p.result.id, tier: state.tier, indices, series, prevUrl: pages[p.i - 1]?.url,
+      });
+      if (!resp || resp.error) throw new Error(resp?.error || "no response from the extension");
+      for (const [i, region] of Object.entries(resp.result.regions)) p.result.regions[i] = region;
+      await redraw(p);
+    } catch (e) {
+      state.lastError = String(e?.message || e);
+      console.warn("[AutoTranslateEx] retranslate", p.url, state.lastError);
+    } finally {
+      p.retranslating = false;
+      p.img.style.cursor = "";
+    }
+  }
+
+  const flaggedIn = (p) => (p.result?.regions || []).map((r, i) => (r.flagged ? i : -1)).filter((i) => i >= 0);
 
   function evictFarPages() {
     for (const p of pages) {
@@ -132,6 +201,7 @@
   chrome.storage.local.get(C.defaults).then((s) => {
     state.enabled = s.enabled;
     state.tier = s.tier;
+    state.highlight = s.highlight;
     pump();
   });
 
@@ -145,6 +215,10 @@
       state.enabled = changes.enabled.newValue;
       if (!state.enabled) resetAll();
     }
+    if (changes.highlight) {
+      state.highlight = changes.highlight.newValue;
+      for (const p of pages) if (p.status === "done") redraw(p);
+    }
     pump();
   });
 
@@ -155,10 +229,22 @@
       busy: pages.filter((p) => p.status === "busy").length,
       errors: pages.filter((p) => p.status === "error").length,
       current: state.current + 1,
+      flaggedHere: flaggedIn(pages[state.current]).length,
+      flagged: pages.reduce((n, p) => n + flaggedIn(p).length, 0),
+      series,
       showOriginal: state.showOriginal,
       lastError: state.lastError,
       avgMs: state.ms.length ? Math.round(state.ms.reduce((a, b) => a + b) / state.ms.length) : null,
     }),
+    // Dev (harness): which bubbles each translated page has flagged.
+    flaggedRegions: () => pages.filter((p) => p.result).map((p) => ({
+      page: p.i, flagged: flaggedIn(p).map((i) => ({ i, box: p.result.regions[i].box })),
+    })),
+    retranslateFlagged: () => {
+      const p = pages[state.current];
+      retranslate(p, flaggedIn(p));
+      return messages.status();
+    },
     toggleOriginal: () => {
       state.showOriginal = !state.showOriginal;
       for (const p of pages) (state.showOriginal ? restore(p) : apply(p));

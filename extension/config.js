@@ -18,7 +18,7 @@ ATX.config = {
     { id: "quick", label: "Quick" },
     { id: "accurate", label: "Accurate" },
   ],
-  defaults: { enabled: true, tier: "quick" },
+  defaults: { enabled: true, tier: "quick", highlight: true },
 
   maxInFlight: 2, // pages being translated at once
   prefetchAhead: 2, // pages past the one on screen

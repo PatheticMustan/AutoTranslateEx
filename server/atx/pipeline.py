@@ -49,8 +49,18 @@ def flagged(impl: str, src: str, dst: str, conf: dict | None) -> bool:
 
 
 # Flag a bubble when the model's mean token log-probability is below this.
-# Set from the uncertainty benchmark (bench/bench_flags.py); None = never by score.
-FLAG_BELOW: dict[str, float | None] = {}
+# From bench/bench_flags.py (300 hand-labelled quick-tier bubbles, 14% wrong):
+# at -0.25 it flags ~14% of bubbles and catches ~36% of the wrong ones, and
+# ~1 in 3 flags is a real error (AUROC 0.72). Hy-MT2 with context uses the same
+# model. opus-mt scores on its own scale: its threshold flags the same share of
+# bubbles on the corpus. Accurate on a discrete GPU (Qwen) is the tier flags
+# point to, so only broken outputs are flagged there.
+FLAG_BELOW: dict[str, float | None] = {
+    "quick": -0.25,
+    "accurate-hymt": -0.25,
+    "very_quick": None,  # set from the corpus run below
+    "accurate": None,
+}
 CONTEXT_WAIT_S = 15  # how long a page waits for the previous page's OCR, if it's in flight
 MAX_REMEMBERED_PAGES = 200
 
@@ -332,6 +342,56 @@ class Pipeline:
         self.cache.put_ocr(sha1, self.ocr_key, bubbles)
         return bubbles, ocr_s
 
+    def _result_key(self, impl: str, texts: list[str], glossary: dict[str, str]) -> tuple[str, list]:
+        """Cache key of a page's translation. The names the page uses are part of
+        it: when the bank learns a name or a spelling changes, pages with that
+        name are redone."""
+        model = translators.TIERS[impl][0] or "opus-mt-zh-en"
+        used = sorted({term for t in texts for term in terms_for(t, glossary)})
+        names_key = hashlib.sha1(repr(used).encode()).hexdigest()[:8] if used else "-"
+        return f"{impl}|{model}|{self.ocr_key}|names:{names_key}|v{PIPELINE_VERSION}", used
+
+    def retranslate(self, sha1: str, tier: str, indices: list[int], series: str | None = None,
+                    prev_url: str | None = None, with_tier: str = "accurate") -> dict:
+        """Redo some bubbles of an already translated page with a better tier.
+
+        The whole page goes through `with_tier`, so each bubble has the page
+        around it as context. Returns {"regions": {index: region}} with just the
+        redone bubbles, for the caller to merge into the result it shows; the
+        page's cached result is updated too when it's still current (the name
+        bank may have moved its key on since).
+        """
+        t0 = time.perf_counter()
+        impl = self.resolve(tier)  # the tier the page is shown in
+        bubbles = self.cache.get_ocr(sha1, self.ocr_key)
+        if bubbles is None:
+            raise ValueError("unknown page; translate it first")
+        texts = [b["text"] for b in bubbles]
+        indices = sorted({i for i in indices if 0 <= i < len(texts)})
+        glossary = self.names.active(series) if series else {}
+
+        better, _ = translators.resolve(with_tier)
+        context = self._context(prev_url) if better in CONTEXT_TIERS else None
+        with self._mt_lock:
+            translator, _ = self._translator(better)
+            dst = translator.translate(texts, context, glossary)
+            scores = list(getattr(translator, "last_scores", []) or []) + [None] * len(dst)
+        redone = {}
+        for i in indices:
+            b = bubbles[i]
+            redone[i] = {"box": b["box"], "src": texts[i], "dst": dst[i], "vertical": b["vertical"],
+                         "frame": b.get("frame"), "confidence": scores[i], "by": better,
+                         "flagged": flagged(better, texts[i], dst[i], scores[i])}
+
+        key, _ = self._result_key(impl, texts, glossary)
+        if (cached := self.cache.get_result(sha1, key)) is not None:
+            for i, region in redone.items():
+                cached["regions"][i] = region
+            self.cache.put_result(sha1, key, cached)
+        log.info("%s retranslated %d bubble(s) with %s in %d ms", sha1[:8], len(indices), better,
+                 (time.perf_counter() - t0) * 1000)
+        return {"id": sha1, "regions": redone, "ms": {"total": round((time.perf_counter() - t0) * 1000)}}
+
     def translate(self, image: bytes, tier: str, page_url: str | None = None,
                   prev_url: str | None = None, series: str | None = None) -> dict:
         """-> {id, w, h, regions: [{box, src, dst, vertical, frame, confidence, flagged}],
@@ -343,7 +403,6 @@ class Pipeline:
         t0 = time.perf_counter()
         sha1 = hashlib.sha1(image).hexdigest()
         impl = self.resolve(tier)
-        model = translators.TIERS[impl][0] or "opus-mt-zh-en"
         if page_url:
             self._expect(page_url)
             self.cache.put_page(page_url, sha1)
@@ -360,11 +419,7 @@ class Pipeline:
         if series:
             self.names.observe(series, sha1, texts)
             glossary = self.names.active(series)
-        # The names this page uses are part of the key: when the bank learns a
-        # name or a spelling is changed, pages with that name are redone.
-        used = sorted({term for t in texts for term in terms_for(t, glossary)})
-        names_key = hashlib.sha1(repr(used).encode()).hexdigest()[:8] if used else "-"
-        key = f"{impl}|{model}|{self.ocr_key}|names:{names_key}|v{PIPELINE_VERSION}"
+        key, used = self._result_key(impl, texts, glossary)
 
         hit = self.cache.get_result(sha1, key)
         if hit is not None and self._stale_without_context(hit, impl, prev_url):
