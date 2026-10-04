@@ -29,12 +29,28 @@ from atx import device as devmod
 from atx import translators
 from atx.cache import PIPELINE_VERSION, Cache
 from atx.grouping import Bubble, attach_frames, group_lines, split_by_regions, uncovered
+from atx.names import NameBank, names_from_translation, terms_for
 from atx.ocr import DEFAULT_DET_SIDE, DEFAULT_MODEL_SET, MODEL_SETS, Line, Ocr, OcrResult
 from atx.translators.base import Translator
 
 log = logging.getLogger("atx")
 
 CONTEXT_TIERS = {"accurate", "accurate-hymt", "accurate-2b"}
+
+
+def flagged(impl: str, src: str, dst: str, conf: dict | None) -> bool:
+    """Whether a translation is likely wrong enough to highlight: see FLAG_BELOW."""
+    from atx.translators.llm import bad_output
+
+    if bad_output(src, dst):
+        return True
+    threshold = FLAG_BELOW.get(impl)
+    return bool(conf and threshold is not None and conf["mean"] < threshold)
+
+
+# Flag a bubble when the model's mean token log-probability is below this.
+# Set from the uncertainty benchmark (bench/bench_flags.py); None = never by score.
+FLAG_BELOW: dict[str, float | None] = {}
 CONTEXT_WAIT_S = 15  # how long a page waits for the previous page's OCR, if it's in flight
 MAX_REMEMBERED_PAGES = 200
 
@@ -154,6 +170,7 @@ class Pipeline:
         self.ocr_key = (f"{self.ocr.model_set}@{self.ocr.det_side}"
                         f"{'+det' if self.detector else ''}|v{PIPELINE_VERSION}")
         self.cache = cache or Cache()
+        self.names = NameBank(self.cache)
         self._ocr_lock = threading.Lock()
         # One page translates at a time: the LLM tiers already batch a page's
         # bubbles, and this also makes tier switches safe.
@@ -316,54 +333,75 @@ class Pipeline:
         return bubbles, ocr_s
 
     def translate(self, image: bytes, tier: str, page_url: str | None = None,
-                  prev_url: str | None = None) -> dict:
-        """-> {id, w, h, regions: [{box, src, dst, vertical}], tier, cached, ms, note}"""
+                  prev_url: str | None = None, series: str | None = None) -> dict:
+        """-> {id, w, h, regions: [{box, src, dst, vertical, frame, confidence, flagged}],
+               tier, cached, ms, note}
+
+        `series` turns on the name bank: names found on the page are recorded, and
+        the series' known names are given to the translator with fixed spellings.
+        """
         t0 = time.perf_counter()
         sha1 = hashlib.sha1(image).hexdigest()
         impl = self.resolve(tier)
         model = translators.TIERS[impl][0] or "opus-mt-zh-en"
-        key = f"{impl}|{model}|{self.ocr_key}|v{PIPELINE_VERSION}"
         if page_url:
             self._expect(page_url)
             self.cache.put_page(page_url, sha1)
 
         texts = None
         try:
-            hit = self.cache.get_result(sha1, key)
-            if hit is not None and self._stale_without_context(hit, impl, prev_url):
-                hit = None  # translated before the previous page was ready; redo it with context
-            if hit is not None:
-                texts = [r["src"] for r in hit["regions"]]
-                ms = {"total": round((time.perf_counter() - t0) * 1000)}
-                log.info("%s %s cached, %d bubbles, %d ms", sha1[:8], impl, len(texts), ms["total"])
-                return {**hit, "id": sha1, "tier": impl, "cached": True, "ms": ms, "note": self.tier_note}
-
-            w, h = image_size(image)
             bubbles, ocr_s = self._bubbles(sha1, image)
             texts = [b["text"] for b in bubbles]
         finally:
             if page_url:
                 self._remember(page_url, texts)  # also on failure, so the next page stops waiting
 
+        glossary: dict[str, str] = {}
+        if series:
+            self.names.observe(series, sha1, texts)
+            glossary = self.names.active(series)
+        # The names this page uses are part of the key: when the bank learns a
+        # name or a spelling is changed, pages with that name are redone.
+        used = sorted({term for t in texts for term in terms_for(t, glossary)})
+        names_key = hashlib.sha1(repr(used).encode()).hexdigest()[:8] if used else "-"
+        key = f"{impl}|{model}|{self.ocr_key}|names:{names_key}|v{PIPELINE_VERSION}"
+
+        hit = self.cache.get_result(sha1, key)
+        if hit is not None and self._stale_without_context(hit, impl, prev_url):
+            hit = None  # translated before the previous page was ready; redo it with context
+        if hit is not None:
+            ms = {"total": round((time.perf_counter() - t0) * 1000)}
+            log.info("%s %s cached, %d bubbles, %d ms", sha1[:8], impl, len(texts), ms["total"])
+            return {**hit, "id": sha1, "tier": impl, "cached": True, "ms": ms, "note": self.tier_note}
+
+        w, h = image_size(image)
         context = self._context(prev_url) if impl in CONTEXT_TIERS else None
         load_s = mt_s = 0.0
         dst: list[str] = []
+        scores: list = []
         if texts:
             with self._mt_lock:
                 translator, load_s = self._translator(impl)
                 t1 = time.perf_counter()
-                dst = translator.translate(texts, context)
+                dst = translator.translate(texts, context, glossary)
+                scores = list(getattr(translator, "last_scores", []) or [])
                 mt_s = time.perf_counter() - t1
+        scores += [None] * (len(dst) - len(scores))
+        if series:  # names the translator spelled out in pinyin, for later pages
+            self.names.observe_names(series, sha1, [n for src, d in zip(texts, dst)
+                                                    for n in names_from_translation(src, d)])
 
         result = {"w": w, "h": h, "with_context": bool(context), "regions": [
-            {"box": b["box"], "src": b["text"], "dst": d, "vertical": b["vertical"], "frame": b.get("frame")}
-            for b, d in zip(bubbles, dst)
+            {"box": b["box"], "src": b["text"], "dst": d, "vertical": b["vertical"], "frame": b.get("frame"),
+             "confidence": c, "flagged": flagged(impl, b["text"], d, c)}
+            for b, d, c in zip(bubbles, dst, scores)
         ]}
         self.cache.put_result(sha1, key, result)
         ms = {"ocr": None if ocr_s is None else round(ocr_s * 1000), "load": round(load_s * 1000),
               "translate": round(mt_s * 1000), "total": round((time.perf_counter() - t0) * 1000)}
-        log.info("%s %s %d bubbles%s: ocr %s, translate %d ms, total %d ms%s",
+        log.info("%s %s %d bubbles%s%s: ocr %s, translate %d ms, total %d ms%s",
                  sha1[:8], impl, len(texts), " (with context)" if context else "",
+                 f" ({len(used)} names)" if used else "",
                  "cached" if ms["ocr"] is None else f"{ms['ocr']} ms", ms["translate"], ms["total"],
                  f" (cold: load {ms['load']} ms)" if load_s else "")
         return {**result, "id": sha1, "tier": impl, "cached": False, "ms": ms, "note": self.tier_note}

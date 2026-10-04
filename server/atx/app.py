@@ -2,11 +2,12 @@
 
     python -m atx.app [--tier quick] [--port 8765] [--ocr-device auto|cpu|dml]
 
-POST /translate  multipart: image (file), tier, page_url?, prev_url?
+POST /translate  multipart: image (file), tier, page_url?, prev_url?, series?
                  -> {id, w, h, regions: [{box: [x0,y0,x1,y1], src, dst, vertical}],
                      tier, cached, ms: {ocr, load, translate, total}, note}
                  page_url/prev_url let the accurate tier use the previous page as context.
 POST /warm       form: tier. Loads that tier's model now (the popup calls it on a tier change).
+GET  /names      ?series=: the series' name bank. POST /names (series, zh, en?) fixes or removes one.
 GET  /health     tiers, current tier, device per component, fallback reasons, free RAM.
 DELETE /cache    forget all cached OCR and translations.
 
@@ -87,7 +88,8 @@ def health() -> dict:
 # translation of another.
 @app.post("/translate")
 def translate(image: UploadFile = File(...), tier: str = Form("quick"),
-              page_url: str | None = Form(None), prev_url: str | None = Form(None)) -> dict:
+              page_url: str | None = Form(None), prev_url: str | None = Form(None),
+              series: str | None = Form(None)) -> dict:
     data = image.file.read(MAX_IMAGE_BYTES + 1)
     if not data:
         raise HTTPException(400, "empty image")
@@ -95,7 +97,7 @@ def translate(image: UploadFile = File(...), tier: str = Form("quick"),
         raise HTTPException(413, "image too large")
     pipeline = _pipeline()
     try:
-        return pipeline.translate(data, tier, page_url, prev_url)
+        return pipeline.translate(data, tier, page_url, prev_url, series or None)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
@@ -108,6 +110,21 @@ def warm(tier: str = Form(...)) -> dict:
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     return {**pipeline.health(), "load_ms": round(load_s * 1000)}
+
+
+@app.get("/names")
+def names(series: str) -> dict:
+    """The series' name bank: [{zh, en, user_set, pages}], most frequent first.
+    Names on fewer than 2 pages aren't used yet unless set by the user."""
+    return {"series": series, "names": _pipeline().names.all(series)}
+
+
+@app.post("/names")
+def set_name(series: str = Form(...), zh: str = Form(...), en: str | None = Form(None)) -> dict:
+    """Fix a name's spelling, or remove it from the bank (no `en`)."""
+    pipeline = _pipeline()
+    pipeline.names.set(series, zh, en.strip() if en and en.strip() else None)
+    return {"series": series, "names": pipeline.names.all(series)}
 
 
 @app.delete("/cache")

@@ -12,6 +12,7 @@ import sentencepiece as spm
 
 from atx import device as devmod
 from atx.models import model_path
+from atx.names import terms_for
 
 MODEL = "opus-mt-zh-en"
 
@@ -42,11 +43,23 @@ class OpusTranslator:
                 devmod.record_fallback("very_quick", f"CUDA unusable: {e}")
         return ctranslate2.Translator(path, device="cpu", compute_type="int8", intra_threads=threads), "cpu"
 
-    def translate(self, texts: list[str], context: list[str] | None = None) -> list[str]:
+    def translate(self, texts: list[str], context: list[str] | None = None,
+                  glossary: dict[str, str] | None = None) -> list[str]:
+        self.last_scores = []
         if not texts:
             return []
-        batch = [self._src.encode(self._t2s.convert(t), out_type=str) + ["</s>"] for t in texts]
-        results = self._model.translate_batch(batch, beam_size=self._beam, max_decoding_length=200)
+        # No prompt to put names in, so put the English name straight into the
+        # source; the model copies Latin words through.
+        sources = []
+        for t in texts:
+            for zh, en in terms_for(t, glossary or {}):
+                t = t.replace(zh, f" {en} ")
+            sources.append(t)
+        batch = [self._src.encode(self._t2s.convert(t), out_type=str) + ["</s>"] for t in sources]
+        results = self._model.translate_batch(batch, beam_size=self._beam, max_decoding_length=200,
+                                              return_scores=True)  # length-normalized (length_penalty=1)
+        # The score is the mean token log-probability, as for the LLM tiers (no min here).
+        self.last_scores = [{"mean": r.scores[0], "min": None} for r in results]
         return [self._tgt.decode([tok for tok in r.hypotheses[0] if tok != "</s>"]) for r in results]
 
     def close(self) -> None:

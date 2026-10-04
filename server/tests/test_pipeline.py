@@ -38,8 +38,10 @@ class FakeTranslator:
     def __init__(self):
         self.contexts = []
 
-    def translate(self, texts, context=None):
+    def translate(self, texts, context=None, glossary=None):
         self.contexts.append(context)
+        self.glossaries = getattr(self, "glossaries", []) + [glossary]
+        self.last_scores = [{"mean": -0.1, "min": -0.5} for _ in texts]
         return [f"EN:{t}" for t in texts]
 
     def close(self):
@@ -179,3 +181,31 @@ def test_frames_attach_to_the_bubble_containing_the_text():
     frames = {b.text: b.frame for b in bubbles}
     assert frames["右邊"] == (10, 5, 80, 120)  # the smaller of two nested frames
     assert frames["左邊"] == (280, 0, 340, 140)
+
+
+def test_name_bank_feeds_the_translator_and_redoes_pages_when_it_learns(p, monkeypatch):
+    from atx import names
+    # Pretend jieba finds the name 右邊 on every page that has it.
+    monkeypatch.setattr(names, "find_names", lambda text: ["右邊"] if "右邊" in text else [])
+    a, b = png(255), png(200)
+    p.translate(a, "quick", series="s1")
+    assert p.fake.glossaries[-1] == {}  # seen on one page: not trusted yet
+    p.translate(b, "quick", series="s1")
+    assert p.fake.glossaries[-1] == {"右邊": "Youbian"}  # second page: in the bank
+    r = p.translate(a, "quick", series="s1")  # page one now has a known name: redone
+    assert r["cached"] is False and p.fake.glossaries[-1] == {"右邊": "Youbian"}
+    assert p.translate(a, "quick", series="s1")["cached"] is True
+    # A user spelling change redoes it again.
+    p.names.set("s1", "右邊", "Right")
+    assert p.translate(a, "quick", series="s1")["cached"] is False
+    assert p.fake.glossaries[-1] == {"右邊": "Right"}
+    # Without a series, no bank.
+    p.translate(png(100), "quick")
+    assert p.fake.glossaries[-1] == {}
+
+
+def test_regions_carry_confidence_and_flags(p):
+    r = p.translate(png(255), "quick")
+    assert r["regions"][0]["confidence"] == {"mean": -0.1, "min": -0.5}
+    # The fake translator echoes the Chinese back: a broken output is always flagged.
+    assert r["regions"][0]["flagged"] is True

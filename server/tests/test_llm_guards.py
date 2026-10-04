@@ -20,9 +20,9 @@ def scripted(cls, reply, **kw):
     def chat(messages, max_tokens, **extra):
         text = messages[-1]["content"]
         tr.prompts.append(text)
-        return reply(text)
+        return reply(text), [("x", -0.1)]
 
-    tr._chat = chat
+    tr._chat_scored = chat
     return tr
 
 

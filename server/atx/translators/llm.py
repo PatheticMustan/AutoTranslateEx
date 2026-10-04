@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 import httpx
 
 from atx.llm_process import LlamaServer
+from atx.names import terms_for
 
 # Tencent's Chinese-language template (used when Chinese is the source or target).
 HY_MT_PROMPT = "将以下文本翻译为英语，注意只需要输出翻译后的结果，不要额外解释：\n\n{text}"
@@ -25,6 +26,10 @@ HY_MT_PROMPT = "将以下文本翻译为英语，注意只需要输出翻译后�
 # text below, not the text above, without explanation".
 HY_MT_CONTEXT_PROMPT = "{context}\n参考上面的信息，把下面的文本翻译成英语，注意不需要翻译上文，也不要额外解释：\n{text}"
 HY_MT_CONTEXT_BUBBLES = 8  # how many preceding bubbles to show as context
+# Tencent's terminology template: fixed translations for terms (here: names from
+# the name bank), placed before either prompt above.
+HY_MT_TERMS = "参考下面的翻译：\n{terms}\n\n"
+HY_MT_TERM = "{zh} 翻译成 {en}"
 # Tencent's recommended sampling for the 1.8B model.
 HY_MT_SAMPLING = {"temperature": 0.7, "top_p": 0.6, "top_k": 20, "repeat_penalty": 1.05}
 
@@ -74,6 +79,16 @@ def bad_output(src: str, dst: str) -> bool:
     return badness(src, dst) > 0
 
 
+def confidence(tokens: list[tuple[str, float]]) -> dict | None:
+    """How sure the model was of its output, from its tokens' log-probabilities:
+    mean (overall) and min (the single least likely token, e.g. a guessed name).
+    None when the server didn't return log-probabilities."""
+    lps = [lp for tok, lp in tokens if tok.strip()]
+    if not lps:
+        return None
+    return {"mean": sum(lps) / len(lps), "min": min(lps)}
+
+
 class _LlmTranslator:
     name = "llm"
 
@@ -87,8 +102,12 @@ class _LlmTranslator:
         return self.server.device
 
     def _chat(self, messages: list[dict], max_tokens: int, **extra) -> str:
+        return self._chat_scored(messages, max_tokens, **extra)[0]
+
+    def _chat_scored(self, messages: list[dict], max_tokens: int, **extra) -> tuple[str, list[tuple[str, float]]]:
+        """The reply, and its tokens with their log-probabilities."""
         resp = self._http.post("/v1/chat/completions", json={
-            "messages": messages, "max_tokens": max_tokens, "cache_prompt": True, **extra,
+            "messages": messages, "max_tokens": max_tokens, "cache_prompt": True, "logprobs": True, **extra,
         })
         resp.raise_for_status()
         data = resp.json()
@@ -99,7 +118,9 @@ class _LlmTranslator:
             "prompt_tps": timings.get("prompt_per_second"),
             "gen_tps": timings.get("predicted_per_second"),
         })
-        return data["choices"][0]["message"]["content"].strip()
+        choice = data["choices"][0]
+        tokens = [(t["token"], t["logprob"]) for t in ((choice.get("logprobs") or {}).get("content") or [])]
+        return choice["message"]["content"].strip(), tokens
 
     def close(self) -> None:
         self._http.close()
@@ -116,63 +137,81 @@ class HyMtTranslator(_LlmTranslator):
         self.use_context = use_context
         self.sampling = HY_MT_SAMPLING if sampling is None else sampling
 
-    def translate(self, texts: list[str], context: list[str] | None = None) -> list[str]:
+    def translate(self, texts: list[str], context: list[str] | None = None,
+                  glossary: dict[str, str] | None = None) -> list[str]:
         self.last_usage = []
         preceding = list(context or [])
 
-        def prompt(i: int) -> str:
+        def terms(i: int) -> str:
+            found = terms_for(texts[i], glossary or {})
+            if not found:
+                return ""
+            return HY_MT_TERMS.format(terms="\n".join(HY_MT_TERM.format(zh=zh, en=en) for zh, en in found))
+
+        def prompt(i: int, with_context: bool) -> str:
             before = (preceding + texts[:i])[-HY_MT_CONTEXT_BUBBLES:]
-            if self.use_context and before:
-                return HY_MT_CONTEXT_PROMPT.format(context="\n".join(before), text=texts[i])
-            return HY_MT_PROMPT.format(text=texts[i])
+            if with_context and before:
+                return terms(i) + HY_MT_CONTEXT_PROMPT.format(context="\n".join(before), text=texts[i])
+            return terms(i) + HY_MT_PROMPT.format(text=texts[i])
 
-        def ask(content: str) -> str:
-            return self._chat([{"role": "user", "content": content}], max_tokens=160, **self.sampling)
+        def ask(content: str) -> tuple[str, list]:
+            return self._chat_scored([{"role": "user", "content": content}], max_tokens=160, **self.sampling)
 
-        def one(i: int) -> str:
-            out = ask(prompt(i))
-            if not bad_output(texts[i], out):
+        def one(i: int) -> tuple[str, list]:
+            out = ask(prompt(i, self.use_context))
+            if not bad_output(texts[i], out[0]):
                 return out
             # One retry. Without context, since short bubbles (sound effects,
             # one-word replies) sometimes get the context translated instead;
             # leftover Chinese characters usually go away on a resample.
-            retry = ask(HY_MT_PROMPT.format(text=texts[i]))
-            return min(out, retry, key=lambda o: badness(texts[i], o))  # ties keep the first
+            retry = ask(prompt(i, False))
+            return min(out, retry, key=lambda o: badness(texts[i], o[0]))  # ties keep the first
 
         with ThreadPoolExecutor(max_workers=self.server.parallel) as pool:
-            return list(pool.map(one, range(len(texts))))
+            results = list(pool.map(one, range(len(texts))))
+        self.last_scores = [confidence(tokens) for _, tokens in results]
+        return [text for text, _ in results]
 
 
 class QwenPageTranslator(_LlmTranslator):
     name = "accurate"
 
-    def translate(self, texts: list[str], context: list[str] | None = None) -> list[str]:
+    def translate(self, texts: list[str], context: list[str] | None = None,
+                  glossary: dict[str, str] | None = None) -> list[str]:
         self.last_usage = []
+        self.last_scores = []
         if not texts:
             return []
         try:
-            out = self._page(texts, context)
+            out = self._page(texts, context, glossary)
             if len(out) != len(texts):
                 raise ValueError("wrong number of translations")
         except (json.JSONDecodeError, TypeError, ValueError):
             # Fallback: one bubble per request, still with the page as context.
-            return [self._page([t], context)[0] for t in texts]
+            out = [self._page([t], context, glossary)[0] for t in texts]
         # The schema fixes the count, not the content: small models sometimes copy
         # the source back or put several bubbles into one. Retry those one at a time.
-        for i, s in enumerate(out):
+        for i, (s, _) in enumerate(out):
             if bad_output(texts[i], s):
-                retry = self._page([texts[i]], context)[0]
-                out[i] = min(s, retry, key=lambda o: badness(texts[i], o))
-        return out
+                retry = self._page([texts[i]], context, glossary)[0]
+                out[i] = min(out[i], retry, key=lambda o: badness(texts[i], o[0]))
+        self.last_scores = [score for _, score in out]
+        return [t for t, _ in out]
 
-    def _page(self, texts: list[str], context: list[str] | None) -> list[str]:
+    def _page(self, texts: list[str], context: list[str] | None,
+              glossary: dict[str, str] | None) -> list[tuple[str, dict]]:
+        """[(translation, confidence)] from one request covering `texts`."""
         parts = []
+        names = {zh: en for t in (context or []) + texts for zh, en in terms_for(t, glossary or {})}
+        if names:
+            parts.append("Spell these names exactly like this:\n"
+                         + "\n".join(f"{zh} = {en}" for zh, en in names.items()))
         if context:
             parts.append("Previous page, for context only (do not translate):\n"
                          + json.dumps(context, ensure_ascii=False))
         parts.append(f"Translate these {len(texts)} bubbles, in order:\n" + json.dumps(texts, ensure_ascii=False))
         schema = {"type": "array", "items": {"type": "string"}, "minItems": len(texts), "maxItems": len(texts)}
-        content = self._chat(
+        content, tokens = self._chat_scored(
             [{"role": "system", "content": QWEN_SYSTEM}, {"role": "user", "content": "\n\n".join(parts)}],
             max_tokens=80 + 60 * len(texts),
             response_format={"type": "json_schema", "json_schema": {"name": "translations", "schema": schema}},
@@ -182,4 +221,23 @@ class QwenPageTranslator(_LlmTranslator):
         out = json.loads(content)
         if not isinstance(out, list) or not all(isinstance(s, str) for s in out):
             raise ValueError("expected a JSON array of strings")
-        return [s.strip() for s in out]
+        scores = [confidence(t) for t in _tokens_per_string(tokens)]
+        scores += [None] * (len(out) - len(scores))
+        return [(s.strip(), score) for s, score in zip(out, scores)]
+
+
+JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def _tokens_per_string(tokens: list[tuple[str, float]]) -> list[list[tuple[str, float]]]:
+    """Split a JSON-array reply's tokens by which string literal they fall in."""
+    raw = "".join(t for t, _ in tokens)
+    starts, pos = [], 0
+    for t, _ in tokens:
+        starts.append(pos)
+        pos += len(t)
+    groups = []
+    for m in JSON_STRING.finditer(raw):
+        a, b = m.start() + 1, m.end() - 1  # inside the quotes
+        groups.append([tok for tok, st in zip(tokens, starts) if st < b and st + len(tok[0]) > a])
+    return groups

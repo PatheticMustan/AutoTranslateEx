@@ -15,3 +15,5 @@ numpy
 pillow
 pytest
 psutil
+jieba
+pypinyin
