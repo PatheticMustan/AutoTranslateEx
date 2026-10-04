@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 
-PIPELINE_VERSION = 2  # 2: watermark filter, with_context flag
+PIPELINE_VERSION = 3  # 2: watermark filter, with_context flag; 3: detector frames + recovered text
 DB = Path(__file__).resolve().parent.parent / "cache.db"
 
 _SCHEMA = """

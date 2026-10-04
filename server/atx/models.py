@@ -71,6 +71,9 @@ HY_MT_QUANTS: dict[str, HfModel] = {
        for q in ["IQ4_XS", "Q3_K_M", "IQ3_XXS", "Q2_K", "IQ2_M"]},
 }
 MODELS.update(HY_MT_QUANTS)
+
+# Speech-bubble and text detector (RT-DETR, Apache-2.0), small int8 variant: see atx/detector.py.
+MODELS["comic-detector"] = HfModel("ogkalu/comic-text-and-bubble-detector", ["detector-v4-s_int8.onnx"])
 DISCRETE_ONLY = {"qwen3.5-4b"}   # the accurate tier uses it only on a discrete GPU
 BENCH_ONLY = {"qwen3.5-2b", *HY_MT_QUANTS}
 

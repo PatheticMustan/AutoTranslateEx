@@ -30,6 +30,7 @@ MIN_SCORE = 0.5
 class Bubble:
     lines: list[Line]  # in reading order
     vertical: bool
+    frame: tuple[int, int, int, int] | None = None  # the detected speech bubble around it, if any
 
     @property
     def text(self) -> str:
@@ -146,6 +147,71 @@ def _in_tracks(group: list[Line], center, along) -> list[Line]:
         else:
             tracks.append([ln])
     return [ln for track in tracks for ln in sorted(track, key=along)]
+
+
+def attach_frames(bubbles: list[Bubble], frames: list) -> None:
+    """Give each bubble the detected speech-bubble frame (atx.detector) containing
+    its center; the smallest one when detections are nested."""
+    for b in bubbles:
+        cx, cy = (b.box[0] + b.box[2]) / 2, (b.box[1] + b.box[3]) / 2
+        inside = [f for f in frames if f[0] <= cx <= f[2] and f[1] <= cy <= f[3]]
+        if inside:
+            b.frame = tuple(min(inside, key=lambda f: (f[2] - f[0]) * (f[3] - f[1])))
+
+
+def split_by_regions(bubbles: list[Bubble], regions: list) -> list[Bubble]:
+    """Split bubbles whose lines fall into different detected text regions.
+
+    Neighbouring floating lines from two speakers can touch closely enough for
+    group_lines to merge them, while the detector boxes them apart. The detector
+    only splits, never merges: it sometimes boxes two narration paragraphs as one.
+    Lines outside every region stay with the part holding their nearest line.
+    """
+    out: list[Bubble] = []
+    for b in bubbles:
+        owner = []
+        for ln in b.lines:
+            best, best_cover = None, 0.5
+            for i, r in enumerate(regions):
+                if (c := _cover(r, ln.box)) > best_cover:
+                    best, best_cover = i, c
+            owner.append(best)
+        if len({o for o in owner if o is not None}) < 2:
+            out.append(b)
+            continue
+        parts: dict[int, list[Line]] = {}
+        for ln, o in zip(b.lines, owner):
+            if o is None:  # join the part of the nearest assigned line
+                o = min((oo for oo in owner if oo is not None),
+                        key=lambda oo: min(_gap(ln.box, m.box) for m, mo in zip(b.lines, owner) if mo == oo))
+            parts.setdefault(o, []).append(ln)
+        out += [_make_bubble(g) for g in parts.values()]
+    out.sort(key=lambda b: (_row_key(b), -b.box[2]))
+    return out
+
+
+def _gap(a, b) -> float:
+    dx = max(0, max(a[0], b[0]) - min(a[2], b[2]))
+    dy = max(0, max(a[1], b[1]) - min(a[3], b[3]))
+    return dx + dy
+
+
+def uncovered(regions: list, lines: list[Line], min_cover: float = 0.2) -> list:
+    """Detected text regions that hardly overlap any OCR line: text OCR missed."""
+    return [r for r in regions
+            if sum(_cover(r, ln.box) * (ln.w * ln.h) for ln in lines) < min_cover * _area(r)]
+
+
+def _area(box) -> int:
+    return max(1, (box[2] - box[0]) * (box[3] - box[1]))
+
+
+def _cover(region, box) -> float:
+    """Share of `box` that lies inside `region`."""
+    ix = max(0, min(region[2], box[2]) - max(region[0], box[0]))
+    iy = max(0, min(region[3], box[3]) - max(region[1], box[1]))
+    area = max(1, (box[2] - box[0]) * (box[3] - box[1]))
+    return ix * iy / area
 
 
 def _row_key(b: Bubble) -> int:

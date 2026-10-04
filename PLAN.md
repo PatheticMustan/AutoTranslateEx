@@ -379,6 +379,16 @@ Findings and decisions:
 - **Speed:** smaller quants (tested in Phase 2b: nothing below Q4 is worth it), reusing the llama.cpp prompt cache for the accurate tier. (Prefetching the next chapter: dropped.)
 - **Better fill:** use the bubble mask from the detector instead of a rectangle.
 
+**Bubble detector results (2026-10-04, branch `phase5-bubble-detector`):**
+- **No fine-tuning needed.** The ogkalu repo ships a small int8 variant (`detector-v4-s_int8.onnx`, 10.6 MB) that runs at ~130 ms per page on CPU with the whole page squashed to 640×640. The larger variants weren't more useful: fp32 is 817 ms on CPU (60 ms on DirectML). Cutting pages into square tiles was 3–4× slower and worse (merged narration paragraphs, a false bubble). Details in `atx/detector.py`.
+- **Grouping by detector regions lost** to the heuristic on the truth pages: 28/30 bubbles and 17.7% character error (it boxed two narration paragraphs as one), vs. 30/30 and 1.7%. So the heuristic still groups, and the detector does three narrower jobs:
+  1. **Splits** heuristic groups whose lines fall in different detected regions, but never merges. On the 20 samples it made exactly one split, the right one: two speakers' touching floating lines (法國啊 / 是喔我要去滑雪) had been merged into one bubble and one large box.
+  2. **Recovers missed text:** a detected text region with no OCR lines is OCR'd again as a 2× crop. It recovered 2 lines the full-page pass missed (我媽想去血拼囉 over a sky panel; a whole bubble, 誰說妳可以這麼做的？). The other candidates returned nothing, so no junk was added.
+  3. **Frames:** each bubble gets the detected speech bubble around it (47 of 89 bubbles; narration has none). `render.js` searches for text space inside the frame and centers the English on it.
+- Truth score unchanged (30/30, 1.7%). Cost: the OCR step goes from ~310 to ~520 ms per page on the dev CPU (detector + recovery crops); measure on the Yoga.
+- Optional: without the model file (or with `ATX_DETECTOR=0`) the pipeline behaves as before. `PIPELINE_VERSION` 3.
+- Not done: using the bubble's mask shape for the fill, and YOLO26n (not needed unless the Yoga is too slow).
+
 ## Risks
 - Hy-MT2 GGUF may need a newer or patched llama.cpp for some quantizations. Use HY-MT1.5 as the fallback.
 - PP-OCR on stylized comic fonts and vertical Traditional text needs measuring; the Phase 1 benchmark decides.

@@ -81,3 +81,16 @@ def test_watermark_stripped():
     assert strip_watermark(row(0, 0, "ACloudMe信件內只有n張紙條，")).text == "信件內只有n張紙條，"
     # Traditional text that shares a character with the watermark stays.
     assert strip_watermark(row(0, 0, "因為集會事件")).text == "因為集會事件"
+
+
+def test_detector_regions_split_but_never_merge():
+    from atx.grouping import split_by_regions
+    # Two touching columns from two speakers: one group, but two detected regions.
+    a, b = col(100, 0, "法國啊。"), col(60, 0, "是喔我要去滑雪。")
+    merged = group_lines([a, b])
+    assert len(merged) == 1
+    split = split_by_regions(merged, [(95, 0, 160, 400), (50, 0, 95, 400)])
+    assert sorted(x.text for x in split) == ["是喔我要去滑雪。", "法國啊。"]
+    # One region covering two separate groups doesn't merge them.
+    far = group_lines([col(300, 0, "一一"), col(100, 0, "二二")])
+    assert len(split_by_regions(far, [(0, 0, 400, 400)])) == 2

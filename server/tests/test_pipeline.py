@@ -49,6 +49,7 @@ class FakeTranslator:
 @pytest.fixture
 def p(tmp_path, monkeypatch):
     monkeypatch.setattr(pl, "load_ocr", lambda *a, **k: FakeOcr())
+    monkeypatch.setattr(pl, "load_detector", lambda: None)
     pipe = pl.Pipeline(cache=Cache(tmp_path / "cache.db"))
     pipe.fake = FakeTranslator()
     pipe._translator = lambda impl: (pipe.fake, 0.0)
@@ -157,3 +158,24 @@ def test_page_cached_without_context_is_redone_once_context_exists(p):
     # Tiers without context never redo.
     p.translate(b, "quick", page_url="u2", prev_url="u1")
     assert p.translate(b, "quick", page_url="u2", prev_url="u1")["cached"] is True
+
+
+def test_recover_missed_maps_crop_lines_back_to_the_page():
+    class CropOcr:
+        def __call__(self, image):  # sees the 2x crop; reports a line in crop pixels
+            return OcrResult([Line((24, 24, 64, 224), "我媽想去", 0.99)])
+
+    page = Image.new("RGB", (400, 600), "white")
+    lines = pl.recover_missed(CropOcr(), page, [(100, 200, 150, 320)])
+    # crop origin = region - 12px margin = (88, 188); crop pixels / 2 + origin
+    assert lines[0].box == (88 + 12, 188 + 12, 88 + 32, 188 + 112)
+    assert lines[0].text == "我媽想去"
+
+
+def test_frames_attach_to_the_bubble_containing_the_text():
+    from atx.grouping import attach_frames, group_lines
+    bubbles = group_lines([Line((30, 10, 50, 100), "右邊", 0.9), Line((300, 10, 320, 100), "左邊", 0.9)])
+    attach_frames(bubbles, [(0, 0, 100, 150), (10, 5, 80, 120), (280, 0, 340, 140)])
+    frames = {b.text: b.frame for b in bubbles}
+    assert frames["右邊"] == (10, 5, 80, 120)  # the smaller of two nested frames
+    assert frames["左邊"] == (280, 0, 340, 140)

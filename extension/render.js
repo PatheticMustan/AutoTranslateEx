@@ -88,7 +88,7 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
   function drawRegion(ctx, region, fill, canvas, others) {
     const C = ATX.config;
     const box = padded(region.box, canvas);
-    const lay = layout(ctx, region.dst, box, fill, canvas, others);
+    const lay = layout(ctx, region.dst, box, fill, canvas, others, region.frame);
 
     // Paint only the original Chinese and a snug box around the English, not the
     // whole area the layout searched: that area is only mostly empty.
@@ -127,8 +127,8 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
   }
 
   // -> {size, lines, box}: where and how big to set the text.
-  function layout(ctx, text, box, fill, canvas, others = []) {
-    const inBubble = layoutInBubble(ctx, text, box, fill, canvas, others);
+  function layout(ctx, text, box, fill, canvas, others = [], frame = null) {
+    const inBubble = layoutInBubble(ctx, text, box, fill, canvas, others, frame);
     if (inBubble.size >= ATX.config.comfortableFontPx) return inBubble;
     const widened = layoutWidened(ctx, text, box, canvas.width);
     const [wx0, wy0, wx1, wy1] = widened.box;
@@ -139,12 +139,17 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
   // Try rectangles centered on the OCR box: for each width, the tallest one that
   // is still empty bubble (fill-colored, or inside the OCR box, and not inside
   // another region's box). Keep the one allowing the largest font.
-  function layoutInBubble(ctx, text, box, fill, { width: W, height: H }, others) {
+  function layoutInBubble(ctx, text, box, fill, { width: W, height: H }, others, frame) {
     const C = ATX.config;
     const [x0, y0, x1, y1] = box;
     const w = x1 - x0, h = y1 - y0;
-    const ax0 = Math.max(0, x0 - Math.max(w, 60)), ax1 = Math.min(W, x1 + Math.max(w, 60));
-    const ay0 = Math.max(0, y0 - Math.round(h * 0.3)), ay1 = Math.min(H, y1 + Math.round(h * 0.3));
+    // Search inside the detected speech bubble when the server found one;
+    // otherwise around the text, by a margin based on its size.
+    const [ax0, ay0, ax1, ay1] = frame
+      ? [Math.max(0, Math.min(frame[0], x0)), Math.max(0, Math.min(frame[1], y0)),
+         Math.min(W, Math.max(frame[2], x1)), Math.min(H, Math.max(frame[3], y1))]
+      : [Math.max(0, x0 - Math.max(w, 60)), Math.max(0, y0 - Math.round(h * 0.3)),
+         Math.min(W, x1 + Math.max(w, 60)), Math.min(H, y1 + Math.round(h * 0.3))];
     const aw = ax1 - ax0, ah = ay1 - ay0;
     const data = ctx.getImageData(ax0, ay0, aw, ah).data;
 
@@ -175,7 +180,9 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
       return sat[ry1 * s + rx1] - sat[ry0 * s + rx1] - sat[ry1 * s + rx0] + sat[ry0 * s + rx0];
     };
 
-    const cx = (x0 + x1) / 2 - ax0, cy = (y0 + y1) / 2 - ay0;
+    // Center on the bubble when known (its widest, tallest part), else on the text.
+    const [fx0, fy0, fx1, fy1] = frame || box;
+    const cx = (fx0 + fx1) / 2 - ax0, cy = (fy0 + fy1) / 2 - ay0;
     let best = null;
     const step = Math.max(4, Math.round(w * 0.1));
     for (let rw = w; rw <= aw; rw += step) {

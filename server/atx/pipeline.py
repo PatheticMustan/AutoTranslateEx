@@ -28,8 +28,8 @@ from pathlib import Path
 from atx import device as devmod
 from atx import translators
 from atx.cache import PIPELINE_VERSION, Cache
-from atx.grouping import Bubble, group_lines
-from atx.ocr import DEFAULT_DET_SIDE, DEFAULT_MODEL_SET, MODEL_SETS, Ocr, OcrResult
+from atx.grouping import Bubble, attach_frames, group_lines, split_by_regions, uncovered
+from atx.ocr import DEFAULT_DET_SIDE, DEFAULT_MODEL_SET, MODEL_SETS, Line, Ocr, OcrResult
 from atx.translators.base import Translator
 
 log = logging.getLogger("atx")
@@ -39,9 +39,71 @@ CONTEXT_WAIT_S = 15  # how long a page waits for the previous page's OCR, if it'
 MAX_REMEMBERED_PAGES = 200
 
 
-def ocr_page(ocr: Ocr, image) -> tuple[list[Bubble], OcrResult]:
+def ocr_page(ocr: Ocr, image, detector=None) -> tuple[list[Bubble], OcrResult]:
+    """OCR a page and group its lines into bubbles.
+
+    With a detector (atx.detector), text regions OCR missed are OCR'd again on
+    their own (cropped, upscaled 2x), and each bubble gets the detected speech
+    bubble around it as its frame.
+    """
     result = ocr(image)
-    return group_lines(result.lines), result
+    lines = result.lines
+    frames: list = []
+    regions: list = []
+    if detector is not None:
+        page = _open(image)
+        found = detector(page)
+        frames = [d.box for d in found if d.label == "bubble"]
+        regions = [d.box for d in found if d.label != "bubble"]
+        lines = lines + recover_missed(ocr, page, uncovered(regions, lines))
+        result.seconds["detect"] = detector.last_ms / 1000
+    bubbles = split_by_regions(group_lines(lines), regions)
+    attach_frames(bubbles, frames)
+    return bubbles, result
+
+
+RECOVER_MARGIN = 12
+
+
+def recover_missed(ocr: Ocr, page, regions: list) -> list[Line]:
+    """OCR each region on its own. The full-page pass misses some tilted or
+    stylized text; a 2x crop reads it (e.g. 我媽想去血拼囉 over a sky panel)."""
+    out = []
+    w, h = page.size
+    for r in regions:
+        x0, y0 = max(0, r[0] - RECOVER_MARGIN), max(0, r[1] - RECOVER_MARGIN)
+        x1, y1 = min(w, r[2] + RECOVER_MARGIN), min(h, r[3] + RECOVER_MARGIN)
+        crop = page.crop((x0, y0, x1, y1))
+        crop = crop.resize((crop.width * 2, crop.height * 2))
+        buf = io.BytesIO()
+        crop.save(buf, "PNG")
+        for ln in ocr(buf.getvalue()).lines:
+            bx0, by0, bx1, by1 = ln.box
+            out.append(Line((x0 + bx0 // 2, y0 + by0 // 2, x0 + bx1 // 2, y0 + by1 // 2), ln.text, ln.score))
+    return out
+
+
+def _open(image):
+    from PIL import Image
+
+    if isinstance(image, (bytes, bytearray)):
+        image = io.BytesIO(image)
+    return Image.open(image).convert("RGB")
+
+
+def load_detector():
+    """The bubble detector, or None when its model isn't downloaded
+    (python -m atx.models comic-detector) or ATX_DETECTOR=0."""
+    import os
+
+    if os.environ.get("ATX_DETECTOR", "1") == "0":
+        return None
+    from atx import detector
+
+    if not detector.available():
+        log.info("bubble detector not downloaded (python -m atx.models comic-detector); grouping without it")
+        return None
+    return detector.Detector()
 
 
 def image_size(image: bytes) -> tuple[int, int]:
@@ -87,8 +149,10 @@ class Pipeline:
     def __init__(self, ocr_models: str = DEFAULT_MODEL_SET, ocr_device: str = "auto",
                  cache: Cache | None = None):
         self.ocr = load_ocr(ocr_models, ocr_device)
+        self.detector = load_detector()
         # Bubbles are cached after grouping, so the key carries the pipeline version too.
-        self.ocr_key = f"{self.ocr.model_set}@{self.ocr.det_side}|v{PIPELINE_VERSION}"
+        self.ocr_key = (f"{self.ocr.model_set}@{self.ocr.det_side}"
+                        f"{'+det' if self.detector else ''}|v{PIPELINE_VERSION}")
         self.cache = cache or Cache()
         self._ocr_lock = threading.Lock()
         # One page translates at a time: the LLM tiers already batch a page's
@@ -244,9 +308,10 @@ class Pipeline:
             return bubbles, None
         with self._ocr_lock:
             t0 = time.perf_counter()
-            found, _ = ocr_page(self.ocr, image)
+            found, _ = ocr_page(self.ocr, image, self.detector)
             ocr_s = time.perf_counter() - t0
-        bubbles = [{"box": list(b.box), "text": b.text, "vertical": b.vertical} for b in found]
+        bubbles = [{"box": list(b.box), "text": b.text, "vertical": b.vertical,
+                    "frame": list(b.frame) if b.frame else None} for b in found]
         self.cache.put_ocr(sha1, self.ocr_key, bubbles)
         return bubbles, ocr_s
 
@@ -291,7 +356,7 @@ class Pipeline:
                 mt_s = time.perf_counter() - t1
 
         result = {"w": w, "h": h, "with_context": bool(context), "regions": [
-            {"box": b["box"], "src": b["text"], "dst": d, "vertical": b["vertical"]}
+            {"box": b["box"], "src": b["text"], "dst": d, "vertical": b["vertical"], "frame": b.get("frame")}
             for b, d in zip(bubbles, dst)
         ]}
         self.cache.put_result(sha1, key, result)
