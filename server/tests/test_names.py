@@ -52,3 +52,32 @@ def test_translation_names_skip_interjections_but_keep_nicknames():
     assert names_from_translation("哈哈哈！", "Hahaha!") == []
     assert names_from_translation("叮咚", "Ding Dong") == []
     assert names_from_translation("花花！", "Huahua!") == ["花花"]
+
+
+def test_cut_off_names_are_extended(tmp_path):
+    bank = NameBank(Cache(tmp_path / "c.db"))
+    for page, text in [("p1", "白智晷可以為了我挨子彈"), ("p2", "要我親自找你父親來問你嗎白智晷。"), ("p3", "白智晷！")]:
+        bank.observe_names("s", page, ["白智"], [text])
+    assert bank.active("s") == {"白智晷": "Bai Zhigui"}
+    # Followed by different characters (or particles): not extended.
+    for page, text in [("q1", "黎玥說"), ("q2", "黎玥同學"), ("q3", "黎玥！")]:
+        bank.observe_names("s", page, ["黎玥"], [text])
+    assert bank.active("s")["黎玥"] == "Li Yue"
+
+
+def test_name_shaped_strings():
+    from atx.names import name_shaped
+    assert "黎玥" in name_shaped("我不叫脛骨，叫做黎玥哦！")
+    assert "妮妮" in name_shaped("妮妮怎麼了？")
+    # Interjections, "thank you", prefix + common word, cut by a common word.
+    for text in ["嗯嗯", "謝妳。", "小心點！", "嚴同學好", "池老師來了", "熊副社長說"]:
+        assert name_shaped(text) == [], text
+
+
+def test_shapes_join_the_bank_after_three_pages(tmp_path):
+    bank = NameBank(Cache(tmp_path / "c.db"))
+    for i in range(2):
+        bank.observe("s", f"p{i}", ["叫做黎玥哦"])
+    assert "黎玥" not in bank.active("s")
+    bank.observe("s", "p2", ["黎玥同學"])
+    assert bank.active("s")["黎玥"] == "Li Yue"

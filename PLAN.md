@@ -151,6 +151,8 @@ server/
     device.py        # detect GPU once; choose providers/builds; CPU fallback
     llm_process.py   # start/stop llama-server with the chosen GGUF
     cache.py         # SQLite: image sha1 + tier → result JSON
+    names.py         # per-series name bank
+    detector.py      # speech-bubble and text detector
     pipeline.py      # bytes → regions
     app.py           # FastAPI
   bench/
@@ -158,6 +160,10 @@ server/
     bench_ocr.py
     bench_mt.py      # side-by-side HTML report + latency/RAM table
     bench_quant.py   # Hy-MT2 quantizations: chrF vs reference, speed
+    fetch_corpus.py  # whole chapters into samples/corpus (local only)
+    corpus_ocr.py    # OCR the corpus once
+    bench_names.py   # name bank: none / auto / reference, name accuracy
+    bench_flags.py   # uncertainty: hand-labelled bubbles, AUROC, thresholds
     smoke_server.py  # drive a running server like the extension does
   tests/
   models/  samples/  cache.db   # gitignored
@@ -388,6 +394,55 @@ Findings and decisions:
 - Truth score unchanged (30/30, 1.7%). Cost: the OCR step goes from ~310 to ~520 ms per page on the dev CPU (detector + recovery crops); measure on the Yoga.
 - Optional: without the model file (or with `ATX_DETECTOR=0`) the pipeline behaves as before. `PIPELINE_VERSION` 3.
 - Not done: using the bubble's mask shape for the fill, and YOLO26n (not needed unless the Yoga is too slow).
+- Dropped: filling the bubble's shape (the rectangles are good enough).
+
+### Phase 6: Name bank and uncertainty highlighting (2026-10-04)
+
+**Test corpus:** 44 chapters of series 20001 (1,188 pages, 5,250 bubbles; three runs of consecutive chapters from the start, middle and end). Local only, in `server/samples/corpus/`.
+- Chapter lists were read in the in-app browser: the series and chapter pages block scripts. `bench/fetch_corpus.py` downloads from the image host (Referer only; no blocks, 1 dead page).
+- `bench/corpus_ocr.py` OCRs it once to `ocr.json`.
+
+**Name bank** (`atx/names.py`, per series, in the SQLite cache). The extension sends the series id; names are found three ways:
+1. **jieba's person-name tag.** Only words *outside* its dictionary count: the tag also lands on 謝謝 "thanks", 明白, 原諒, while real names are out-of-vocabulary.
+2. **Pinyin in the translations.** A capitalized phrase that spells 2–4 source characters (Hy-MT2 writes "Li Yue" for 黎玥). This catches rare-character names jieba misses. Interjections (哈哈 "Haha") and common words are skipped.
+3. **Name-shaped strings.** 2–3 characters starting with a common surname or 小/阿, or a doubled character, not a dictionary word, and not cut from a common word (嚴同 in 嚴同學). This is for opus-mt, which never spells names out. It's the weakest signal, so it needs 3 pages.
+
+How names are used:
+- A name is used once seen on 2 pages. A name followed by the same character on ≥80% of its pages is extended (白智 → 白智晷, 利亞 → 利亞繪).
+- Spelling: pinyin, "Surname Given" (Li Yue); 小/阿 nicknames (Xiao Hong); titles and groups (Uncle Sen, Brother Shen, Tianhai Society).
+- Names with Simplified-only characters are watermark junk and are dropped.
+- Each tier gets the names its own way:
+  - Hy-MT2: Tencent's terminology template ("参考下面的翻译：黎玥 翻译成 Li Yue");
+  - Qwen: a names list in the prompt;
+  - opus-mt: the English name substituted into the source.
+- The result cache key includes the names a page uses, so learning a name or changing a spelling redoes the pages that use it. The popup lists the bank, with editable spellings.
+
+Results (`bench/bench_names.py`; 730 bubbles containing one of 24 reference names written by Claude): name spelled right.
+
+| Tier | No bank | Automatic bank | Reference bank |
+|---|---|---|---|
+| quick (Hy-MT2) | 64% | **98%** (all 24 names found, all spelled as the reference) | 100% |
+| very quick (opus-mt) | 5% | **78%** (22 of 24 found) | 94% |
+
+- Putting names in the prompt works (reference bank ≈ 100%), so what's left is *finding* them.
+- On the 32 labelled bubbles that contain a name, the reference bank fixed 13 of 14 wrong-name bubbles, and nothing else in those sentences got worse.
+- The first version (jieba + translations only) reached 90% / 45%. Extending cut-off names and the name-shaped signal brought it to 98% / 78%.
+- From OCR text alone (no translations), the bank finds 22 of 24 reference names.
+- Known gaps:
+  - single-character names (宵) aren't handled;
+  - opus-mt can't learn names only a translation reveals (花花 is a dictionary word; 恩祈 starts with no surname).
+  - The bank is per series, not per tier, so reading one chapter on the quick tier fills it in for the very-quick tier too.
+
+**Uncertainty highlighting:**
+- Every translation gets a confidence: the mean (and min) token log-probability, from llama-server's logprobs or CTranslate2's scores.
+- `bench/bench_flags.py`: 300 random quick-tier bubbles, hand-labelled by Claude. 42 wrong (14%), 16 of them names.
+- Mean log-prob separates wrong from ok with AUROC 0.72 (min 0.68, length 0.53). At **< −0.25** it flags ~14% of bubbles, catches ~36% of the wrong ones, and ~1 in 3 flags is a real error. Confidently wrong outputs are mostly OCR misreads (一 → "One") and idioms.
+- opus-mt's threshold (−0.96) flags the same 14% of the corpus; its confidence is a weaker signal (AUROC 0.63 on the same labels).
+- Broken outputs (`bad_output`) are always flagged.
+- In the extension:
+  - a flagged bubble gets an amber "?" badge; hover explains, and a click retranslates it with the accurate tier and redraws the page;
+  - the popup has a highlight switch and "Retranslate N uncertain" for the current page.
+  - `POST /retranslate` returns only the redone bubbles, so it still works after the name bank has moved the page's cache key.
 
 ## Risks
 - Hy-MT2 GGUF may need a newer or patched llama.cpp for some quantizations. Use HY-MT1.5 as the fallback.

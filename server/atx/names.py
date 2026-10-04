@@ -20,6 +20,9 @@ from functools import cache
 log = logging.getLogger("atx")
 
 MIN_PAGES = 2
+# A name that's followed by the same character on this share of its pages is a
+# cut-off longer name: jieba finds 白智 in 白智晷, the model writes "Liya" for 利亞繪.
+EXTEND_SHARE = 0.8
 NAME_TAGS = {"nr", "nrfg", "nrt"}
 CJK_ONLY = re.compile(r"^[㐀-䶿一-鿿豈-﫿]{2,4}$")
 # Common Chinese surnames (Traditional forms), for "Surname Given" spelling.
@@ -28,9 +31,15 @@ SURNAMES = set(
     "姚盧姜崔鍾譚陸汪范金石廖賈夏韋付方白鄒孟熊秦邱江尹薛閻段雷侯龍史陶黎賀顧毛郝龔邵萬錢嚴覃武戴莫孔向湯"
     "柯池宮花游簡溫藍連施洪溫柳殷莊利里靳")
 NICKNAME_PREFIXES = {"小": "Xiao", "阿": "A", "老": "Lao"}
-TITLE_SUFFIXES = {"叔": "Uncle", "伯": "Uncle", "姨": "Auntie"}  # 森叔 -> Uncle Sen
+# 森叔 -> Uncle Sen, 神哥 -> Brother Shen, 天海會 -> Tianhai Society, 愛班 -> Class Ai
+TITLE_SUFFIXES = {"叔": "Uncle {}", "伯": "Uncle {}", "姨": "Auntie {}", "哥": "Brother {}", "姐": "Sister {}",
+                  "媽": "Mrs. {}", "會": "{} Society", "班": "Class {}"}
 # Characters that start a phrase, not a name: segmentation leftovers like 了黎.
 PARTICLES = set("了的是在和跟把被給對讓叫說找向與也都就還又這那你我他她")
+# Name-shaped strings (below) never contain these: pronouns, sentence-final
+# particles and interjections (謝妳 "thank you", 錢嗎, 嗯嗯).
+NOT_IN_NAMES = PARTICLES | set("妳們嗎呢吧啦啊呀哦喔欸嗯哈嘿呵嘻喀咩唉哎耶噢家大好嘛副")
+NGRAM_MIN_PAGES = 3  # the weakest signal, so it needs more pages
 # Words jieba often tags as names that aren't (honorifics, common words).
 NOT_NAMES = {"學姐", "學長", "學妹", "學弟", "老師", "同學", "社長", "會長", "姐姐", "哥哥", "妹妹", "弟弟",
              "媽媽", "爸爸", "大家", "小姐", "先生", "老大", "小鬼", "阿姨"}
@@ -44,6 +53,23 @@ def _tools():
 
     jieba.setLogLevel(logging.WARNING)
     return jieba.posseg, opencc.OpenCC("t2s")
+
+
+@cache
+def _s2t():
+    import opencc
+
+    return opencc.OpenCC("s2t")
+
+
+# Valid in Traditional text too, though OpenCC's s2t maps them (里 -> 裡, 后 -> 後).
+BOTH_SCRIPTS = set("里后台面松干云余谷系卷才只冲表")
+
+
+def _simplified_only(text: str) -> bool:
+    """Contains Simplified-only characters: in a Traditional comic that's the
+    site's watermark (集云数据...), not a name."""
+    return any(_s2t().convert(c) != c for c in text if c not in BOTH_SCRIPTS)
 
 
 def find_names(text: str) -> list[str]:
@@ -74,7 +100,42 @@ def _common_word(text: str) -> bool:
     _, t2s = _tools()
     simplified = t2s.convert(text)
     tag = jieba.posseg.dt.word_tag_tab.get(simplified)
-    return (jieba.dt.FREQ.get(simplified) or 0) >= 50 or (tag is not None and not tag.startswith("n"))
+    return (jieba.dt.FREQ.get(simplified) or 0) >= 1000 or (tag is not None and not tag.startswith("n"))
+
+
+def name_shaped(text: str) -> list[str]:
+    """2-3 character strings shaped like names, for series where the translator
+    never spells names out (opus-mt garbles them): starting with a common
+    surname or a 小/阿 prefix, or a doubled character (妮妮), not a dictionary
+    word, and not a prefix plus a common word (小心點, 池老師). Recurring ones
+    become names; most noise doesn't recur."""
+    _, t2s = _tools()
+    out = set()
+    for n in (2, 3):
+        for i in range(len(text) - n + 1):
+            g = text[i:i + n]
+            if not CJK_ONLY.match(g) or g in NOT_NAMES or any(c in NOT_IN_NAMES for c in g):
+                continue
+            if not (g[0] in SURNAMES or g[0] in NICKNAME_PREFIXES or (n == 2 and g[0] == g[1])):
+                continue
+            simple = t2s.convert(g)
+            if _dictionary_word(simple) or _simplified_only(g):
+                continue
+            if n == 3 and (_common(simple[:2]) or _common(simple[1:])):
+                continue
+            # The edge character belongs to a common word with its neighbour: 嚴同 in
+            # 嚴同學, 池老 in 池老師, 熊副社 in 熊副社長.
+            after, before = text[i + n:i + n + 1], text[i - 1:i] if i else ""
+            if (after and _common(t2s.convert(g[-1] + after), 200))                     or (before and _common(t2s.convert(before + g[0]), 200)):
+                continue
+            out.add(g)
+    return sorted(out)
+
+
+def _common(simplified: str, at_least: int = 1000) -> bool:
+    import jieba
+
+    return (jieba.dt.FREQ.get(simplified) or 0) >= at_least
 
 
 def _dictionary_word(simplified: str) -> bool:
@@ -117,7 +178,8 @@ def romanize(name: str) -> str:
 
     syl = lazy_pinyin(name, style=Style.NORMAL)
     if name[-1] in TITLE_SUFFIXES and len(name) >= 2:
-        return f"{TITLE_SUFFIXES[name[-1]]} {romanize(name[:-1]) if len(name) > 2 else syl[0].capitalize()}"
+        base = romanize(name[:-1]) if len(name) > 2 else syl[0].capitalize()
+        return TITLE_SUFFIXES[name[-1]].format(base)
     if name[0] in NICKNAME_PREFIXES and len(name) >= 2:
         return f"{NICKNAME_PREFIXES[name[0]]} {''.join(syl[1:]).capitalize()}"
     if name[0] in SURNAMES and len(name) >= 2:
@@ -132,6 +194,11 @@ class NameBank:
     CREATE TABLE IF NOT EXISTS names (series TEXT, zh TEXT, en TEXT, user_set INTEGER DEFAULT 0,
                                       PRIMARY KEY (series, zh));
     CREATE TABLE IF NOT EXISTS name_pages (series TEXT, zh TEXT, page TEXT, PRIMARY KEY (series, zh, page));
+    -- the character after each occurrence ('' when none, or not part of a name)
+    CREATE TABLE IF NOT EXISTS name_next (series TEXT, zh TEXT, page TEXT, next TEXT,
+                                          PRIMARY KEY (series, zh, page, next));
+    -- name-shaped strings (name_shaped), counted separately: a weaker signal
+    CREATE TABLE IF NOT EXISTS name_shapes (series TEXT, zh TEXT, page TEXT, PRIMARY KEY (series, zh, page));
     """
 
     def __init__(self, cache):
@@ -145,22 +212,66 @@ class NameBank:
             return self._cache._db.execute(sql, args).fetchall()
 
     def observe(self, series: str, page: str, texts: list[str]) -> None:
-        """Record the names jieba finds on a page (idempotent per page)."""
-        self.observe_names(series, page, [n for t in texts for n in find_names(t)])
+        """Record the names jieba finds on a page, and name-shaped strings
+        (idempotent per page)."""
+        self.observe_names(series, page, [n for t in texts for n in find_names(t)], texts)
+        for g in {g for t in texts for g in name_shaped(t)}:
+            self._sql("INSERT OR IGNORE INTO name_shapes VALUES (?,?,?)", (series, g, page))
 
-    def observe_names(self, series: str, page: str, names: list[str]) -> None:
-        for zh in set(names):
+    def observe_names(self, series: str, page: str, names: list[str], texts: list[str] = ()) -> None:
+        for zh in {n for n in names if not _simplified_only(n)}:
             self._sql("INSERT OR IGNORE INTO name_pages VALUES (?,?,?)", (series, zh, page))
             self._sql("INSERT OR IGNORE INTO names (series, zh, en) VALUES (?,?,?)", (series, zh, romanize(zh)))
+            for t in texts:
+                for m in re.finditer(re.escape(zh), t):
+                    nxt = t[m.end():m.end() + 1]
+                    if not CJK_ONLY.match(zh + nxt) or nxt in NOT_IN_NAMES:
+                        nxt = ""
+                    self._sql("INSERT OR IGNORE INTO name_next VALUES (?,?,?,?)", (series, zh, page, nxt))
 
     def active(self, series: str) -> dict[str, str]:
-        """zh -> en for names seen on enough pages, or set by the user."""
+        """zh -> en for names seen on enough pages, or set by the user. A name
+        nearly always followed by the same character is replaced by the longer one."""
         rows = self._sql("""
-            SELECT n.zh, n.en FROM names n
+            SELECT n.zh, n.en, n.user_set FROM names n
             WHERE n.series = ? AND (n.user_set = 1 OR
                   (SELECT COUNT(*) FROM name_pages p WHERE p.series = n.series AND p.zh = n.zh) >= ?)""",
                          (series, MIN_PAGES))
-        return dict(rows)
+        user = dict(self._sql("SELECT zh, en FROM names WHERE series=? AND user_set=1", (series,)))
+        out: dict[str, str] = {zh: romanize(zh) for zh in self._recurring_shapes(series)}
+        for zh, en, user_set in rows:
+            longer = None if user_set else self._extension(series, zh)
+            if longer and longer not in user:
+                out.setdefault(longer, romanize(longer))
+            else:
+                out[zh] = en
+        out.update(user)
+        return out
+
+    def _recurring_shapes(self, series: str) -> list[str]:
+        """Name-shaped strings on enough pages. Of two nested ones, the longer
+        wins only if it carries nearly all of the shorter one's pages (白智晷
+        over 白智, but 黎玥 over 黎玥同)."""
+        counts = dict(self._sql("""SELECT zh, COUNT(*) FROM name_shapes WHERE series=?
+                                   GROUP BY zh HAVING COUNT(*) >= ?""", (series, NGRAM_MIN_PAGES)))
+        keep = []
+        for g, c in counts.items():
+            if any(s != g and s in g and c < EXTEND_SHARE * counts[s] for s in counts):
+                continue  # a longer string that's usually just the shorter name plus something
+            if any(l != g and g in l and counts[l] >= EXTEND_SHARE * c for l in counts):
+                continue  # cut off: the longer form is the name
+            keep.append(g)
+        return keep
+
+    def _extension(self, series: str, zh: str) -> str | None:
+        """zh + c when c follows zh on at least EXTEND_SHARE of its pages."""
+        rows = self._sql("SELECT next, COUNT(DISTINCT page) FROM name_next WHERE series=? AND zh=? GROUP BY next",
+                         (series, zh))
+        pages = self._sql("SELECT COUNT(*) FROM name_pages WHERE series=? AND zh=?", (series, zh))[0][0]
+        best = max(((n, c) for n, c in rows if n), key=lambda r: r[1], default=None)
+        if best and len(zh) < 4 and best[1] >= MIN_PAGES and best[1] >= EXTEND_SHARE * pages:
+            return zh + best[0]
+        return None
 
     def all(self, series: str) -> list[dict]:
         rows = self._sql("""

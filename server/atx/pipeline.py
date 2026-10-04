@@ -58,7 +58,7 @@ def flagged(impl: str, src: str, dst: str, conf: dict | None) -> bool:
 FLAG_BELOW: dict[str, float | None] = {
     "quick": -0.25,
     "accurate-hymt": -0.25,
-    "very_quick": None,  # set from the corpus run below
+    "very_quick": -0.96,  # 14th percentile of opus-mt scores over the 1188-page corpus
     "accurate": None,
 }
 CONTEXT_WAIT_S = 15  # how long a page waits for the previous page's OCR, if it's in flight
@@ -444,7 +444,7 @@ class Pipeline:
         scores += [None] * (len(dst) - len(scores))
         if series:  # names the translator spelled out in pinyin, for later pages
             self.names.observe_names(series, sha1, [n for src, d in zip(texts, dst)
-                                                    for n in names_from_translation(src, d)])
+                                                    for n in names_from_translation(src, d)], texts)
 
         result = {"w": w, "h": h, "with_context": bool(context), "regions": [
             {"box": b["box"], "src": b["text"], "dst": d, "vertical": b["vertical"], "frame": b.get("frame"),

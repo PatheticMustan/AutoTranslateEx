@@ -69,7 +69,8 @@ def run(tier: str, mode: str, limit: int | None) -> None:
             context = prev.get(chapter) if impl in ("accurate", "accurate-hymt") else None
             dst = tr.translate(texts, context, glossary) if texts else []
             if mode == "auto":
-                bank.observe_names(series, rel, [x for s, d in zip(texts, dst) for x in names_from_translation(s, d)])
+                bank.observe_names(series, rel, [x for s, d in zip(texts, dst) for x in names_from_translation(s, d)],
+                                   texts)
             out[rel] = {"src": texts, "dst": dst, "confidence": list(getattr(tr, "last_scores", []) or [])}
             prev[chapter] = texts
             if n % 50 == 0:
@@ -79,6 +80,7 @@ def run(tier: str, mode: str, limit: int | None) -> None:
     result = {"tier": impl, "mode": mode, "pages": out}
     if mode == "auto":
         result["bank"] = bank.all("20001")
+        result["active"] = bank.active("20001")
     run_path(tier, mode).write_text(json.dumps(result, ensure_ascii=False), "utf-8")
     print(f"saved {run_path(tier, mode)}")
 
@@ -126,7 +128,7 @@ def report() -> None:
         worst = sorted(per_name.items(), key=lambda kv: kv[1][0] / kv[1][1])[:5]
         line = f"{path.stem}: names right {hits}/{total} ({hits / max(total, 1):.0%})"
         if "bank" in data:
-            active = {r["zh"]: r["en"] for r in data["bank"] if r["pages"] >= 2}
+            active = data.get("active") or {r["zh"]: r["en"] for r in data["bank"] if r["pages"] >= 2}
             found = set(active) & set(truth)
             spelled = sum(norm(active[z]) == norm(truth[z]) for z in found)
             line += (f"; bank: {len(active)} active, {len(found)}/{len(truth)} reference names found "
