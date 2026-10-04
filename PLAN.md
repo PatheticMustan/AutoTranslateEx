@@ -246,7 +246,7 @@ Findings:
 - **Parallel slots help less than expected** (390 vs 522 ms/page) because pages average ~5 bubbles.
 - **llama-server's peak RAM is 1.7–4.7 GB even with the weights on the GPU** (it reads the whole file through memory while loading). On the target's shared-memory iGPU this matters: test `--no-mmap` there.
 - **Hy-MT2 with context (option 1) replaces 2B on the target.** It passed every automatic check (no leftover Chinese, no run-on outputs, nothing that matches the context better than its own bubble) and changed 59 of 89 bubbles versus plain quick: smoother phrasing, and better pronouns and names where the preceding text shows who is speaking. It's still more literal than 4B. It uses Tencent's documented contextual template, which explicitly says not to translate the preceding text.
-- **Guards added:** the Qwen accurate tier retries any bubble whose output is mostly Chinese. Still missing: a check for merged or run-on outputs (output far longer than its source); Hy-MT2's one-request-per-bubble design can't merge bubbles.
+- **Guards added:** the Qwen accurate tier retries any bubble whose output is mostly Chinese. Since Phase 2b, both LLM tiers also retry outputs that are far longer than their source or multi-line from a one-line source (merged bubbles, leaked context); Hy-MT2 retries those without context.
 - Not yet done: the benchmark on the target Yoga, Vulkan/SYCL/OpenVINO builds, and the sustained and battery passes.
 
 ### Phase 2b: Hy-MT2 quantizations (for a smaller, single-tier install)
@@ -280,7 +280,7 @@ Findings:
 - **mradermacher's re-quantized GGUFs have a wrong end-of-sequence token** (id 3, `$`, instead of 120020), so generation never stopped. `atx/models.py` fixes it with `--override-kv` per model.
 - **Single-tier install floor:** ~1.3 GB with the current architecture (Hy-MT2 Q4_K_M, llama.cpp Vulkan and CPU builds, Python packages, OCR models), or ~1.15 GB without Python (OCR in the browser).
 - **CPU speed concern for the target:** Q4_K_M on 6 CPU threads is ~5.3 s/page (p90 14 s) on the dev i9, over the ≤ 5 s CPU-only budget. The Yoga should run it on the iGPU; this is only the fallback. Measure on the Yoga.
-- **New failure found: context leak.** With greedy decoding, even Q8_0 sometimes answers a lone sound effect (嗶, "beep") with a translation of the *preceding bubbles* instead. The Phase 2 run with Tencent's sampling didn't show it, but that doesn't rule it out. Guard to add: if a short bubble's output is far longer than its source, retry it without context.
+- **New failure found: context leak.** With greedy decoding, even Q8_0 sometimes answers a lone sound effect (嗶, "beep") with a translation of the *preceding bubbles* instead. The Phase 2 run with Tencent's sampling didn't show it, but that doesn't rule it out. **Guard added:** `llm.bad_output()` (empty, mostly Chinese, more than 6× the source length + 30 characters, or multi-line from one line). Hy-MT2 retries a flagged bubble without context; Qwen retries it alone. Over every saved benchmark output it flags only real failures, with no false alarms on the good tiers.
 
 ### Phase 3: Server
 - `POST /translate`:
