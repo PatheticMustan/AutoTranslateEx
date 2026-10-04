@@ -59,8 +59,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AutoTranslateEx", lifespan=lifespan)
 # The extension's service worker doesn't need CORS (host permission), but
-# extension pages such as the popup might fetch directly.
-app.add_middleware(CORSMiddleware, allow_origin_regex=r"chrome-extension://.*",
+# extension pages such as the popup might fetch directly, and the dev harness
+# (extension/dev/harness.html) is served from localhost.
+app.add_middleware(CORSMiddleware,
+                   allow_origin_regex=r"chrome-extension://.*|http://(localhost|127\.0\.0\.1)(:\d+)?",
                    allow_methods=["*"], allow_headers=["*"])
 
 

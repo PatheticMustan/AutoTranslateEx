@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "AutoTranslateEx",
+  "version": "0.1.0",
+  "description": "Translates Chinese speech bubbles on mycomic.com into English, using a local server.",
+  "permissions": ["storage", "declarativeNetRequestWithHostAccess"],
+  "host_permissions": [
+    "*://mycomic.com/*",
+    "*://*.biccam.com/*",
+    "*://biccam.com/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["*://mycomic.com/chapters/*", "*://mycomic.com/cn/chapters/*"],
+      "js": ["config.js", "render.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png" }
+  },
+  "icons": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" }
+}

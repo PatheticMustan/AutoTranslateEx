@@ -162,7 +162,9 @@ server/
   tests/
   models/  samples/  cache.db   # gitignored
 extension/
-  manifest.json  background.js  content.js  render.js  popup.html  popup.js  popup.css
+  manifest.json  config.js  api.js  background.js  content.js  render.js
+  popup.html  popup.js  popup.css  icons/
+  dev/harness.html  dev/shim.js   # runs content.js + render.js on sample pages without installing
 ```
 
 ## Phases
@@ -347,6 +349,30 @@ How it works:
   - a server status dot, plus the device in use (GPU name or CPU);
   - a "show original" button;
   - dev only: a "copy page URLs" button that copies the chapter's list in `samples/urls.json` format. It replaces the console snippet for collecting test pages.
+
+**Built (2026-10-04):** `extension/` (manifest, `config.js`, `api.js`, `background.js`, `content.js`, `render.js`, popup, icons), plus `extension/dev/harness.html`.
+
+To load it:
+1. Start the server: `cd server && python -m atx.app`.
+2. In Chrome, open `chrome://extensions`, turn on Developer mode, click "Load unpacked", and pick `extension/`.
+3. Open a chapter page.
+
+The harness runs the real `content.js` and `render.js` on a mock chapter built from `server/samples`, with a stand-in for `chrome.*`, so rendering can be checked without installing anything. Open it at `http://localhost:8770/extension/dev/harness.html?chapter=229697`; the `harness` entry in `.claude/launch.json` serves the repo on that port.
+
+Findings and decisions:
+- **Site markup changed since Phase 0:** pages now carry Alpine.js attributes; the first 3 have `src`, the rest `data-src` for lozad. Every URL is still readable upfront (`data-src || src`). Setting `data-loaded="true"` on a translated image stops lozad from overwriting it, and a MutationObserver puts the translation back if anything else does.
+- **Text layout:** vertical Chinese leaves tall, narrow OCR boxes inside much wider bubbles.
+  - For each candidate width, the renderer finds the tallest centered rectangle that's still empty bubble (fill-colored pixels, via a summed-area table), and uses the one allowing the largest font. Text fills the bubble instead of a thin column.
+  - Neighbouring regions split the gap between them (each may grow only halfway), and a text area never enters another region's box or an earlier text area.
+  - Widening over the art is only a fallback, and is refused if it would overlap a neighbour.
+  - Words are split only at the minimum font size.
+- **Encoding:** `canvas.toBlob` / `OffscreenCanvas.convertToBlob` took a flat ~1 s per page (Chrome encodes them in idle time). Synchronous `toDataURL` takes ~20 ms. Rendering a page now takes 5–70 ms.
+- Checked in the harness (20 sample pages, quick tier): dialogue, sound effects, narration on colored panels, signs; the tier switch, show original, the on/off switch, and lozad not overwriting translated pages.
+- **Not yet tested (needs real Chrome):**
+  - the background worker's Referer rule against biccam.com;
+  - the popup;
+  - scroll-driven behavior (current-page tracking, prefetch while scrolling, putting far pages back to the original). The harness ran in a hidden pane, where Chrome doesn't run IntersectionObservers.
+- **Known misses upstream:** the site watermark gets read as text, and occasionally OCR misses a stylized line. The quick tier sometimes leaves a Chinese character in the output ("Blind腸itis?" for 盲腸炎); `untranslated()` only catches outputs that are mostly Chinese.
 
 ### Phase 5: Experiments (pick based on results)
 - **Bubble detector:** fine-tune YOLO26n, using the ogkalu model to auto-label pages, then compare grouping accuracy and fill quality against the heuristic.

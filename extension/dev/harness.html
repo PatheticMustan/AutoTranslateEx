@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AutoTranslateEx harness</title>
+  <style>
+    :root { --bg: #f6f6f8; --fg: #1d1d1f; --bar: #ffffffee; --line: #ddd; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #18181b; --fg: #ececf0; --bar: #232327ee; --line: #3a3a40; } }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 13px system-ui, sans-serif; }
+    #bar { position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+           padding: 8px 16px; background: var(--bar); border-bottom: 1px solid var(--line); backdrop-filter: blur(6px); }
+    #pages { max-width: 690px; margin: 0 auto; }
+    img.page { display: block; width: 100%; height: auto; min-height: 200px; }
+    #status { color: #888; }
+  </style>
+</head>
+<body>
+  <div id="bar">
+    <strong>Harness</strong>
+    <label><input type="checkbox" id="enabled" checked> enabled</label>
+    <select id="tier"></select>
+    <button id="original" type="button">Show original</button>
+    <span id="status"></span>
+  </div>
+  <!-- Mimics mycomic.com: the first 3 pages have src, the rest data-src for lozad. -->
+  <div id="pages"></div>
+
+  <script>
+    // Scripts load with a cache-busting query so edits show up on reload.
+    const load = (src) => new Promise((ok, fail) => {
+      const s = document.createElement("script");
+      s.src = `${src}?t=${Date.now()}`;
+      s.onload = ok; s.onerror = fail;
+      document.body.append(s);
+    });
+
+    // ?chapter=229697 picks a sample chapter (server/samples, 5 pages each).
+    (async () => {
+      for (const src of ["../config.js", "../api.js", "shim.js", "../render.js"]) await load(src);
+      const chapter = new URLSearchParams(location.search).get("chapter") || "229697";
+      const manifest = await (await fetch("../../server/samples/manifest.json")).json();
+      const files = Object.keys(manifest).filter((k) => manifest[k].chapter === chapter).sort();
+      const box = document.getElementById("pages");
+      files.forEach((f, i) => {
+        const img = document.createElement("img");
+        img.className = "page w-full mx-auto";
+        img.setAttribute(i < 3 ? "src" : "data-src", `../../server/samples/${f}`);
+        box.append(img);
+      });
+
+      // Minimal lozad: load data-src near the viewport, unless already loaded.
+      const lazy = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (!e.isIntersecting) continue;
+          lazy.unobserve(e.target);
+          if (e.target.getAttribute("data-loaded") !== "true") {
+            e.target.src = e.target.getAttribute("data-src");
+            e.target.setAttribute("data-loaded", "true");
+          }
+        }
+      }, { rootMargin: "300px" });
+      box.querySelectorAll("img[data-src]").forEach((img) => lazy.observe(img));
+
+      const tier = document.getElementById("tier");
+      for (const t of ATX.config.tiers) tier.append(new Option(t.label, t.id, false, t.id === ATX.config.defaults.tier));
+      tier.onchange = () => chrome.storage.local.set({ tier: tier.value });
+      document.getElementById("enabled").onchange = (e) => chrome.storage.local.set({ enabled: e.target.checked });
+      document.getElementById("original").onclick = () => ATX.devTab({ type: "toggleOriginal" });
+
+      await load("../content.js");
+      setInterval(() => {
+        const st = ATX.devTab({ type: "status" });
+        if (st) document.getElementById("status").textContent =
+          `${st.done}/${st.total} done, ${st.busy} busy, ${st.errors} errors, on page ${st.current}` +
+          (st.avgMs ? `, ~${st.avgMs} ms/page` : "") + (st.lastError ? ` — ${st.lastError}` : "");
+      }, 500);
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AutoTranslateEx</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>AutoTranslateEx</h1>
+    <label class="switch" title="Translate pages">
+      <input type="checkbox" id="enabled">
+      <span class="track"><span class="thumb"></span></span>
+    </label>
+  </header>
+
+  <section>
+    <div class="label">Translation</div>
+    <div class="tiers" id="tiers" role="radiogroup" aria-label="Translation tier"></div>
+    <p class="hint" id="tier-hint"></p>
+  </section>
+
+  <section class="status">
+    <div class="row"><span class="dot" id="dot"></span><span id="server">Checking server…</span></div>
+    <div class="sub" id="device"></div>
+    <div class="sub" id="note"></div>
+  </section>
+
+  <section class="page" id="page-section" hidden>
+    <div class="row between">
+      <span id="progress"></span>
+      <button id="original" type="button">Show original</button>
+    </div>
+    <div class="sub error" id="page-error"></div>
+  </section>
+
+  <details>
+    <summary>Developer</summary>
+    <button id="copy-urls" type="button">Copy page URLs</button>
+    <span class="sub" id="copy-result"></span>
+  </details>
+
+  <script src="config.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
