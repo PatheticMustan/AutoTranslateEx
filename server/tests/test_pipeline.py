@@ -141,3 +141,19 @@ def test_loaded_4b_skips_free_ram_check(p, monkeypatch):
     p._llm = p._llm_spec = None
     p.resolve("quick")
     assert p.resolve("accurate") == "accurate-hymt" and p.tier_note == "low RAM"
+
+
+def test_page_cached_without_context_is_redone_once_context_exists(p):
+    a, b = png(255), png(200)
+    # Page 2 arrives first: no context yet, so it's translated without it.
+    r = p.translate(b, "accurate", page_url="u2", prev_url="u1")
+    assert r["with_context"] is False and p.fake.contexts == [None]
+    p.translate(a, "accurate", page_url="u1")
+    again = p.translate(b, "accurate", page_url="u2", prev_url="u1")
+    assert again["cached"] is False and again["with_context"] is True
+    assert p.fake.contexts[-1] == ["右邊2左邊"]
+    # Now it's cached with context and stays cached.
+    assert p.translate(b, "accurate", page_url="u2", prev_url="u1")["cached"] is True
+    # Tiers without context never redo.
+    p.translate(b, "quick", page_url="u2", prev_url="u1")
+    assert p.translate(b, "quick", page_url="u2", prev_url="u1")["cached"] is True

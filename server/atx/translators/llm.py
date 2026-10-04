@@ -60,8 +60,18 @@ def run_on(src: str, dst: str) -> bool:
     return "\n" in dst.strip() and "\n" not in src
 
 
+def badness(src: str, dst: str) -> int:
+    """0 for a usable translation. Broken outputs (empty, echoed Chinese, run-on
+    or leaked context) score 100+; otherwise each leftover Chinese character
+    ("Blind腸itis?") counts 1. Lower is better when choosing between attempts."""
+    stray = len(CJK.findall(dst))
+    if not dst.strip() or untranslated(dst) or run_on(src, dst):
+        return 100 + stray
+    return stray
+
+
 def bad_output(src: str, dst: str) -> bool:
-    return not dst.strip() or untranslated(dst) or run_on(src, dst)
+    return badness(src, dst) > 0
 
 
 class _LlmTranslator:
@@ -121,13 +131,13 @@ class HyMtTranslator(_LlmTranslator):
 
         def one(i: int) -> str:
             out = ask(prompt(i))
-            if self.use_context and bad_output(texts[i], out):
-                # Short bubbles (sound effects, one-word replies) sometimes get the
-                # preceding context translated instead; retry without it.
-                retry = ask(HY_MT_PROMPT.format(text=texts[i]))
-                if not bad_output(texts[i], retry):
-                    return retry
-            return out
+            if not bad_output(texts[i], out):
+                return out
+            # One retry. Without context, since short bubbles (sound effects,
+            # one-word replies) sometimes get the context translated instead;
+            # leftover Chinese characters usually go away on a resample.
+            retry = ask(HY_MT_PROMPT.format(text=texts[i]))
+            return min(out, retry, key=lambda o: badness(texts[i], o))  # ties keep the first
 
         with ThreadPoolExecutor(max_workers=self.server.parallel) as pool:
             return list(pool.map(one, range(len(texts))))
@@ -151,7 +161,8 @@ class QwenPageTranslator(_LlmTranslator):
         # the source back or put several bubbles into one. Retry those one at a time.
         for i, s in enumerate(out):
             if bad_output(texts[i], s):
-                out[i] = self._page([texts[i]], context)[0]
+                retry = self._page([texts[i]], context)[0]
+                out[i] = min(s, retry, key=lambda o: badness(texts[i], o))
         return out
 
     def _page(self, texts: list[str], context: list[str] | None) -> list[str]:

@@ -71,3 +71,13 @@ def test_page_order_is_top_to_bottom_then_right_to_left():
     top_right = col(500, 20, "二二")
     bottom = col(300, 800, "三三")
     assert texts(group_lines([bottom, top_left, top_right])) == ["二二", "一一", "三三"]
+
+
+def test_watermark_stripped():
+    from atx.grouping import strip_watermark
+    assert not keep(strip_watermark(row(0, 0, "集云数据")))
+    assert not keep(strip_watermark(row(0, 0, "数据")))
+    assert not keep(strip_watermark(row(0, 0, "ACloudMerge.com")))
+    assert strip_watermark(row(0, 0, "ACloudMe信件內只有n張紙條，")).text == "信件內只有n張紙條，"
+    # Traditional text that shares a character with the watermark stays.
+    assert strip_watermark(row(0, 0, "因為集會事件")).text == "因為集會事件"

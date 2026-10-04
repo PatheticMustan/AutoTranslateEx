@@ -90,26 +90,36 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
     const box = padded(region.box, canvas);
     const lay = layout(ctx, region.dst, box, fill, canvas, others);
 
+    // Paint only the original Chinese and a snug box around the English, not the
+    // whole area the layout searched: that area is only mostly empty.
+    ctx.font = font(lay.size);
+    const lineH = lay.size * C.lineHeight;
+    const textW = Math.max(...lay.lines.map((l) => ctx.measureText(l).width));
+    const textH = lay.lines.length * lineH;
+    const [lx0, ly0, lx1, ly1] = lay.box;
+    const cx = (lx0 + lx1) / 2, cy = (ly0 + ly1) / 2;
+    const snug = [
+      Math.max(lx0, Math.floor(cx - textW / 2 - C.padPx)), Math.max(ly0, Math.floor(cy - textH / 2 - C.padPx / 2)),
+      Math.min(lx1, Math.ceil(cx + textW / 2 + C.padPx)), Math.min(ly1, Math.ceil(cy + textH / 2 + C.padPx / 2)),
+    ];
+
     ctx.fillStyle = `rgb(${fill.join(",")})`;
-    for (const [x0, y0, x1, y1] of [box, lay.box]) { // hide the Chinese; clean the text area
+    for (const [x0, y0, x1, y1] of [box, snug]) {
       ctx.beginPath();
-      ctx.roundRect(x0, y0, x1 - x0, y1 - y0, Math.min(12, lay.size));
+      ctx.roundRect(x0, y0, x1 - x0, y1 - y0, Math.min(8, lay.size / 2));
       ctx.fill();
     }
 
     const lum = 0.299 * fill[0] + 0.587 * fill[1] + 0.114 * fill[2];
     ctx.fillStyle = lum > 128 ? "#111" : "#fff";
-    ctx.font = font(lay.size);
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    const [x0, y0, x1, y1] = lay.box;
-    const lineH = lay.size * C.lineHeight;
-    let y = (y0 + y1) / 2 - ((lay.lines.length - 1) * lineH) / 2;
+    let y = cy - ((lay.lines.length - 1) * lineH) / 2;
     for (const line of lay.lines) {
-      ctx.fillText(line, (x0 + x1) / 2, y);
+      ctx.fillText(line, cx, y);
       y += lineH;
     }
-    return lay.box;
+    return snug; // later regions may use the rest of the searched area
   }
 
   function font(size) {

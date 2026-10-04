@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import atexit
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -22,6 +23,17 @@ LOG = MODELS_DIR / "llama-server.log"
 START_TIMEOUT_S = 180
 
 _job = None  # Windows job object holding every llama-server we start
+
+
+def _port_in_use(port: int) -> bool:
+    with socket.socket() as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def _kill_with_parent(proc: subprocess.Popen) -> None:
@@ -87,6 +99,11 @@ class LlamaServer:
         exe = llama_server_exe(build)
         if not exe.exists():
             raise RuntimeError(f"{exe} missing; run `python -m atx.models {build}`")
+        if _port_in_use(self.port):
+            # Another llama-server (e.g. a second copy of the app) would answer
+            # our health check and translation requests; use a free port instead.
+            self.port = _free_port()
+            self.url = f"http://127.0.0.1:{self.port}"
         cmd = [
             str(exe), "-m", str(gguf_path(self.model)),
             "--host", "127.0.0.1", "--port", str(self.port),

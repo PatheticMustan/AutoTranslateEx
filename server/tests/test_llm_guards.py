@@ -3,7 +3,7 @@
 import json
 
 from atx.translators import llm
-from atx.translators.llm import HyMtTranslator, QwenPageTranslator, bad_output, run_on
+from atx.translators.llm import HyMtTranslator, QwenPageTranslator, bad_output, badness, run_on
 
 
 class FakeServer:
@@ -71,3 +71,19 @@ def test_qwen_retries_merged_bubble_alone():
 
     tr = scripted(QwenPageTranslator, reply)
     assert tr.translate(page) == ["It's me!", "Guess where I am?"]
+
+
+def test_badness_ranks_attempts():
+    assert badness("盲腸炎", "Appendicitis?") == 0
+    assert badness("盲腸炎", "Blind腸itis?") == 1
+    assert badness("學姐就很木訥啊！", "学姐好木讷啊！") >= 100
+
+
+def test_hymt_retries_stray_chinese_and_keeps_the_better_one():
+    replies = iter(["Blind腸itis?", "Appendicitis?"])
+    tr = scripted(HyMtTranslator, lambda p: next(replies))
+    assert tr.translate(["盲腸炎？"]) == ["Appendicitis?"]
+
+    replies = iter(["Blind腸itis?", "盲腸炎？"])  # the retry is worse: keep the first
+    tr = scripted(HyMtTranslator, lambda p: next(replies))
+    assert tr.translate(["盲腸炎？"]) == ["Blind腸itis?"]

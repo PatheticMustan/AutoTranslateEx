@@ -210,15 +210,6 @@ Findings:
 - **Speed vs. budget:** CPU mean 253 ms is under the 0.35 s target, but p90 (432 ms) is over. The 155H's performance cores are roughly comparable to the 12900H's, so expect similar numbers on the target; confirm there in Phase 2. Timing on the dev laptop is noisy (hybrid-core scheduling).
 - **Open for later:** filter the site watermark (a fixed logo; its regions don't match the glyph size of nearby text), and try a detection size between 720 and 960 if the target needs more speed.
 
-### Phase 1b: Normalize text before scoring OCR
-Pages can print variant glyphs (e.g. the Japanese-style 説 for 說, common in manga translations). OCR may return either form, and so may the truth files, so an exact-character comparison counts correct reads as errors.
-- Add `normalize(text)` in `bench/` and apply it to both OCR output and truth before computing character error rate:
-  - fold full-width ASCII letters, digits and punctuation to half-width (`，`→`,`, `Ｃ`→`C`) with NFKC, but keep CJK punctuation such as `。` and `、`;
-  - map a small table of variant characters to one canonical form (説→說, and others as they turn up in the samples);
-  - strip whitespace.
-- Scoring only: the pipeline still sends the raw OCR text to translation.
-- Unit tests for the fold and the variant table.
-
 ### Phase 2: Translation tiers and comparison
 - `opus.py`: CTranslate2 conversion script, OpenCC Traditional→Simplified, batching.
 - `llm_process.py` + `llm.py`: download the llama.cpp Windows builds (CUDA and Vulkan) and GGUFs into `models/`, start them with the GPU-first/CPU-fallback logic, and write the prompts for the quick and accurate tiers.
@@ -372,12 +363,20 @@ Findings and decisions:
   - the background worker's Referer rule against biccam.com;
   - the popup;
   - scroll-driven behavior (current-page tracking, prefetch while scrolling, putting far pages back to the original). The harness ran in a hidden pane, where Chrome doesn't run IntersectionObservers.
-- **Known misses upstream:** the site watermark gets read as text, and occasionally OCR misses a stylized line. The quick tier sometimes leaves a Chinese character in the output ("Blind腸itis?" for 盲腸炎); `untranslated()` only catches outputs that are mostly Chinese.
+- **Known misses upstream:** occasionally OCR misses a stylized line. The quick model sometimes mistranslates rare terms (盲腸炎 "appendicitis" → "ileitis").
+
+**Quality fixes after the first real-Chrome test (2026-10-04):**
+- **Text boxes covered more than the original text:** the renderer painted the whole area its layout searched, which is only ~99% empty. It now paints just the original Chinese box plus a snug box around the English lines.
+- **Watermark:** 集云数据 / ACloudMerge.com (Simplified Chinese, which never appears in this Traditional comic) is stripped from OCR lines before grouping, including when it's merged into a real line.
+- **Leftover Chinese characters in output** ("Blind腸itis?"): `llm.badness()` scores each output (broken = 100+, plus 1 per leftover Chinese character). Any output scoring above 0 gets one retry, and the better of the two is kept. A sweep of the 20 sample pages has no Chinese left in any translation.
+- **Context gap:** results record `with_context`. A cached result made before the previous page was ready is redone once that page's text is known.
+- **Two copies of the server:** llama-server now takes a free port if 8766 is in use. Before, a second copy would have talked to the first one's llama-server.
+- `PIPELINE_VERSION` 2 (also in the OCR cache key, since bubbles are cached after grouping).
 
 ### Phase 5: Experiments (pick based on results)
 - **Bubble detector:** fine-tune YOLO26n, using the ogkalu model to auto-label pages, then compare grouping accuracy and fill quality against the heuristic.
 - **Run OCR in the browser** (onnxruntime-web), so the server only translates.
-- **Speed:** smaller quants (tested in Phase 2b: nothing below Q4 is worth it), speculative prefetch of the next chapter, reusing the llama.cpp prompt cache for the accurate tier.
+- **Speed:** smaller quants (tested in Phase 2b: nothing below Q4 is worth it), reusing the llama.cpp prompt cache for the accurate tier. (Prefetching the next chapter: dropped.)
 - **Better fill:** use the bubble mask from the detector instead of a rectangle.
 
 ## Risks

@@ -87,7 +87,8 @@ class Pipeline:
     def __init__(self, ocr_models: str = DEFAULT_MODEL_SET, ocr_device: str = "auto",
                  cache: Cache | None = None):
         self.ocr = load_ocr(ocr_models, ocr_device)
-        self.ocr_key = f"{self.ocr.model_set}@{self.ocr.det_side}"
+        # Bubbles are cached after grouping, so the key carries the pipeline version too.
+        self.ocr_key = f"{self.ocr.model_set}@{self.ocr.det_side}|v{PIPELINE_VERSION}"
         self.cache = cache or Cache()
         self._ocr_lock = threading.Lock()
         # One page translates at a time: the LLM tiers already batch a page's
@@ -205,6 +206,18 @@ class Pipeline:
         if event:
             event.set()
 
+    def _context_known(self, prev_url: str) -> bool:
+        """Whether the previous page's text is available right now (no waiting)."""
+        with self._book_lock:
+            if self._texts.get(prev_url) is not None:
+                return True
+        sha1 = self.cache.page_sha1(prev_url)
+        return sha1 is not None and self.cache.get_ocr(sha1, self.ocr_key) is not None
+
+    def _stale_without_context(self, hit: dict, impl: str, prev_url: str | None) -> bool:
+        return (impl in CONTEXT_TIERS and bool(prev_url) and not hit.get("with_context", True)
+                and self._context_known(prev_url))
+
     def _context(self, prev_url: str | None) -> list[str] | None:
         """The previous page's bubble texts: from memory, by waiting for its OCR
         if that request is in flight, or from the cache (e.g. after a restart)."""
@@ -251,7 +264,10 @@ class Pipeline:
 
         texts = None
         try:
-            if (hit := self.cache.get_result(sha1, key)) is not None:
+            hit = self.cache.get_result(sha1, key)
+            if hit is not None and self._stale_without_context(hit, impl, prev_url):
+                hit = None  # translated before the previous page was ready; redo it with context
+            if hit is not None:
                 texts = [r["src"] for r in hit["regions"]]
                 ms = {"total": round((time.perf_counter() - t0) * 1000)}
                 log.info("%s %s cached, %d bubbles, %d ms", sha1[:8], impl, len(texts), ms["total"])
@@ -274,7 +290,7 @@ class Pipeline:
                 dst = translator.translate(texts, context)
                 mt_s = time.perf_counter() - t1
 
-        result = {"w": w, "h": h, "regions": [
+        result = {"w": w, "h": h, "with_context": bool(context), "regions": [
             {"box": b["box"], "src": b["text"], "dst": d, "vertical": b["vertical"]}
             for b, d in zip(bubbles, dst)
         ]}

@@ -73,13 +73,24 @@ def _compatible(a: Line, b: Line) -> bool:
     return small > 0 and big / small <= MAX_SIZE_RATIO
 
 
+# mycomic.com's watermark: 集云数据 over "ACloudMerge.com". It's in Simplified
+# Chinese, which never appears in the Traditional text it sits on, and OCR
+# sometimes reads it as part of a real line ("ACloudMe信件內只有n張紙條").
+WATERMARK = re.compile(r"集云数据|集云|云数据|数据|[A-Za-z]*Cloud[A-Za-z]*(?:\.com)?|[A-Za-z]*erge\.com")
+
+
+def strip_watermark(line: Line) -> Line:
+    text = WATERMARK.sub("", line.text).strip()
+    return line if text == line.text else Line(line.box, text, line.score)
+
+
 def keep(line: Line) -> bool:
     """Drop low-confidence lines and ones with no Chinese (watermarks, page numbers)."""
     return line.score >= MIN_SCORE and bool(CJK.search(line.text))
 
 
 def group_lines(lines: list[Line]) -> list[Bubble]:
-    lines = [ln for ln in lines if keep(ln)]
+    lines = [ln for ln in map(strip_watermark, lines) if keep(ln)]
     n = len(lines)
     parent = list(range(n))
 

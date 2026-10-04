@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 
-PIPELINE_VERSION = 1
+PIPELINE_VERSION = 2  # 2: watermark filter, with_context flag
 DB = Path(__file__).resolve().parent.parent / "cache.db"
 
 _SCHEMA = """

@@ -38,7 +38,10 @@
     // ?chapter=229697 picks a sample chapter (server/samples, 5 pages each).
     (async () => {
       for (const src of ["../config.js", "../api.js", "shim.js", "../render.js"]) await load(src);
-      const chapter = new URLSearchParams(location.search).get("chapter") || "229697";
+      const params = new URLSearchParams(location.search);
+      const chapter = params.get("chapter") || "229697";
+      // ?server=http://127.0.0.1:8775 to test against a second server copy.
+      if (params.get("server")) ATX.config.server = params.get("server");
       const manifest = await (await fetch("../../server/samples/manifest.json")).json();
       const files = Object.keys(manifest).filter((k) => manifest[k].chapter === chapter).sort();
       const box = document.getElementById("pages");
