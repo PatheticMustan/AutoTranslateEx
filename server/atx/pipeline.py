@@ -38,14 +38,25 @@ log = logging.getLogger("atx")
 CONTEXT_TIERS = {"accurate", "accurate-hymt", "accurate-2b"}
 
 
-def flagged(impl: str, src: str, dst: str, conf: dict | None) -> bool:
-    """Whether a translation is likely wrong enough to highlight: see FLAG_BELOW."""
+def flagged(impl: str, src: str, dst: str, conf: dict | None, ocr_score: float | None = None) -> bool:
+    """Whether a translation is likely wrong enough to highlight: a broken
+    output, a low translation confidence (FLAG_BELOW), or a doubtful OCR read
+    (FLAG_OCR_BELOW)."""
     from atx.translators.llm import bad_output
 
     if bad_output(src, dst):
         return True
+    if ocr_score is not None and ocr_score < FLAG_OCR_BELOW:
+        return True
     threshold = FLAG_BELOW.get(impl)
     return bool(conf and threshold is not None and conf["mean"] < threshold)
+
+
+# OCR confidence alone is a weak signal (AUROC 0.56 on the labelled bubbles:
+# misreads are often confident), but added to the log-prob rule at 0.8 it
+# catches 40% of wrong translations instead of 36% for 18% flagged instead of
+# 14%, still ~1 in 3 flags a real error.
+FLAG_OCR_BELOW = 0.8
 
 
 # Flag a bubble when the model's mean token log-probability is below this.
@@ -382,7 +393,7 @@ class Pipeline:
             b = bubbles[i]
             redone[i] = {"box": b["box"], "src": texts[i], "dst": dst[i], "vertical": b["vertical"],
                          "frame": b.get("frame"), "size": b.get("size"), "confidence": scores[i], "by": better,
-                         "flagged": flagged(better, texts[i], dst[i], scores[i])}
+                         "flagged": flagged(better, texts[i], dst[i], scores[i], b.get("ocr_score"))}
 
         key, _ = self._result_key(impl, texts, glossary)
         if (cached := self.cache.get_result(sha1, key)) is not None:
@@ -450,7 +461,8 @@ class Pipeline:
         result = {"w": w, "h": h, "with_context": bool(context), "regions": [
             {"box": b["box"], "src": b["text"], "dst": d, "vertical": b["vertical"], "frame": b.get("frame"),
              "size": b.get("size"),
-             "confidence": c, "flagged": flagged(impl, b["text"], d, c)}
+             "confidence": c, "ocr_score": b.get("ocr_score"),
+             "flagged": flagged(impl, b["text"], d, c, b.get("ocr_score"))}
             for b, d, c in zip(bubbles, dst, scores)
         ]}
         self.cache.put_result(sha1, key, result)

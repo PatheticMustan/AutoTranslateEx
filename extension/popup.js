@@ -26,6 +26,15 @@ async function init() {
   $("highlight").addEventListener("change", (e) => chrome.storage.local.set({ highlight: e.target.checked }));
   $("retranslate").addEventListener("click", async () => showPage(await toTab({ type: "retranslateFlagged" })));
   $("copy-urls").addEventListener("click", copyUrls);
+  $("add-term").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!namesFor) return;
+    const zh = $("term-zh").value.trim(), en = $("term-en").value.trim();
+    if (!zh || !en) return;
+    await chrome.runtime.sendMessage({ type: "setName", series: namesFor, zh, en });
+    $("term-zh").value = $("term-en").value = "";
+    loadNames(namesFor);
+  });
 
   refresh();
   setInterval(refresh, 1500);
@@ -106,7 +115,7 @@ async function loadNames(series) {
   const res = await chrome.runtime.sendMessage({ type: "names", series }).catch(() => null);
   if (!res || res.error) return;
   const active = res.names.filter((n) => n.en && (n.user_set || n.pages >= 2));
-  $("names-section").hidden = !active.length;
+  $("names-section").hidden = false;
   $("names-count").textContent = `(${active.length})`;
   $("names").replaceChildren(...active.flatMap((n) => {
     const zh = Object.assign(document.createElement("span"), { className: "zh", textContent: n.zh });
@@ -115,8 +124,8 @@ async function loadNames(series) {
       chrome.runtime.sendMessage({ type: "setName", series, zh: n.zh, en: input.value.trim() || null })
         .then(() => loadNames(series)));
     const pages = Object.assign(document.createElement("span"), {
-      className: "n", textContent: n.user_set ? "set" : `${n.pages} p.`,
-      title: n.user_set ? "Spelling set by you" : `Seen on ${n.pages} pages`,
+      className: "n", textContent: n.user_set ? "yours" : `${n.pages} p.`,
+      title: n.user_set ? "Set by you" : `Found on ${n.pages} pages`,
     });
     return [zh, input, pages];
   }));

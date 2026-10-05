@@ -132,6 +132,16 @@ def name_shaped(text: str) -> list[str]:
     return sorted(out)
 
 
+def _rare_char(char: str) -> bool:
+    """Rare on its own, and not a sound word or interjection (喵 "meow")."""
+    import jieba
+
+    _, t2s = _tools()
+    simplified = t2s.convert(char)
+    tag = jieba.posseg.dt.word_tag_tab.get(simplified) or ""
+    return (jieba.dt.FREQ.get(simplified) or 0) < 1000 and tag not in ("o", "e", "y")
+
+
 def _common(simplified: str, at_least: int = 1000) -> bool:
     import jieba
 
@@ -246,6 +256,12 @@ class NameBank:
             else:
                 out[zh] = en
         out.update(user)
+        # A nickname 小X / 阿X also teaches its bare X (宵 for 小宵), when X is a
+        # rare character on its own; term_spans checks each use.
+        for zh, en in list(out.items()):
+            bare = zh[1:]
+            if len(zh) == 2 and zh[0] in NICKNAME_PREFIXES and en and bare not in out and _rare_char(bare):
+                out[bare] = romanize(bare)
         return out
 
     def _recurring_shapes(self, series: str) -> list[str]:
@@ -289,16 +305,41 @@ class NameBank:
             self._sql("INSERT OR REPLACE INTO names (series, zh, en, user_set) VALUES (?,?,?,1)", (series, zh, en))
 
 
-def terms_for(text: str, bank: dict[str, str]) -> list[tuple[str, str]]:
-    """The bank entries appearing in a text, longest first, without overlaps."""
-    out, taken = [], []
+def term_spans(text: str, bank: dict[str, str]) -> list[tuple[int, int, str, str]]:
+    """(start, end, zh, en) for each bank entry in a text, longest entries
+    first, without overlaps. A one-character entry (宵) only counts where it
+    doesn't form a dictionary word with a neighbour (通宵 "all night")."""
+    spans: list[tuple[int, int, str, str]] = []
     for zh in sorted(bank, key=len, reverse=True):
         if not bank[zh]:  # removed by the user
             continue
         for m in re.finditer(re.escape(zh), text):
-            span = (m.start(), m.end())
-            if not any(a < span[1] and span[0] < b for a, b in taken):
-                taken.append(span)
-                if (zh, bank[zh]) not in out:
-                    out.append((zh, bank[zh]))
+            a, b = m.start(), m.end()
+            if any(x < b and a < y for x, y, _, _ in spans):
+                continue
+            if len(zh) == 1 and not _standalone(text, a):
+                continue
+            spans.append((a, b, zh, bank[zh]))
+    return sorted(spans)
+
+
+def terms_for(text: str, bank: dict[str, str]) -> list[tuple[str, str]]:
+    """The bank entries appearing in a text (see term_spans), each once."""
+    out = []
+    for _, _, zh, en in term_spans(text, bank):
+        if (zh, en) not in out:
+            out.append((zh, en))
     return out
+
+
+def substitute(text: str, bank: dict[str, str]) -> str:
+    """The text with each bank entry replaced by its English (for opus-mt)."""
+    for a, b, _, en in reversed(term_spans(text, bank)):
+        text = f"{text[:a]} {en} {text[b:]}"
+    return text
+
+
+def _standalone(text: str, i: int) -> bool:
+    _, t2s = _tools()
+    before, after = text[i - 1:i + 1] if i else "", text[i:i + 2]
+    return not any(len(w) == 2 and CJK_ONLY.match(w) and _dictionary_word(t2s.convert(w)) for w in (before, after))

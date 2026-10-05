@@ -81,3 +81,20 @@ def test_shapes_join_the_bank_after_three_pages(tmp_path):
     assert "黎玥" not in bank.active("s")
     bank.observe("s", "p2", ["黎玥同學"])
     assert bank.active("s")["黎玥"] == "Li Yue"
+
+
+def test_single_character_names_from_nicknames(tmp_path):
+    from atx.names import substitute
+    bank = NameBank(Cache(tmp_path / "c.db"))
+    for p in ("p1", "p2"):
+        bank.observe_names("s", p, ["小宵"])
+    active = bank.active("s")
+    assert active["宵"] == "Xiao"
+    assert terms_for("對不起！宵！", active) == [("宵", "Xiao")]
+    assert terms_for("宵告訴黎玥", active) == [("宵", "Xiao")]
+    assert terms_for("玩通宵。", active) == []  # 通宵 "all night"
+    assert substitute("對不起！宵！玩通宵", active) == "對不起！ Xiao ！玩通宵"
+    # A common character doesn't become a name: 小紅 doesn't teach 紅 "red".
+    for p in ("p1", "p2"):
+        bank.observe_names("s", p, ["小紅"])
+    assert "紅" not in bank.active("s")

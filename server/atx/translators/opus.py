@@ -12,7 +12,7 @@ import sentencepiece as spm
 
 from atx import device as devmod
 from atx.models import model_path
-from atx.names import terms_for
+from atx.names import substitute
 
 MODEL = "opus-mt-zh-en"
 
@@ -50,11 +50,7 @@ class OpusTranslator:
             return []
         # No prompt to put names in, so put the English name straight into the
         # source; the model copies Latin words through.
-        sources = []
-        for t in texts:
-            for zh, en in terms_for(t, glossary or {}):
-                t = t.replace(zh, f" {en} ")
-            sources.append(t)
+        sources = [substitute(t, glossary or {}) for t in texts]
         batch = [self._src.encode(self._t2s.convert(t), out_type=str) + ["</s>"] for t in sources]
         results = self._model.translate_batch(batch, beam_size=self._beam, max_decoding_length=200,
                                               return_scores=True)  # length-normalized (length_penalty=1)

@@ -428,8 +428,9 @@ Results (`bench/bench_names.py`; 730 bubbles containing one of 24 reference name
 - On the 32 labelled bubbles that contain a name, the reference bank fixed 13 of 14 wrong-name bubbles, and nothing else in those sentences got worse.
 - The first version (jieba + translations only) reached 90% / 45%. Extending cut-off names and the name-shaped signal brought it to 98% / 78%.
 - From OCR text alone (no translations), the bank finds 22 of 24 reference names.
+- **One-character names:** a nickname 小X / 阿X in the bank also teaches its bare X (宵 for 小宵), when X is rare on its own and not a sound word. It only counts where it doesn't form a dictionary word with a neighbour (not in 通宵 "all night"). 對不起！宵！ now reads "I'm sorry! Xiao!" (before: "Night").
+- **Your own terms:** the popup's "Names & terms" section takes any Chinese → English pair (places, groups, slang). They apply exactly like names. Example: 天海會 → "Tianhai Gang".
 - Known gaps:
-  - single-character names (宵) aren't handled;
   - opus-mt can't learn names only a translation reveals (花花 is a dictionary word; 恩祈 starts with no surname).
   - The bank is per series, not per tier, so reading one chapter on the quick tier fills it in for the very-quick tier too.
 
@@ -439,6 +440,7 @@ Results (`bench/bench_names.py`; 730 bubbles containing one of 24 reference name
 - Mean log-prob separates wrong from ok with AUROC 0.72 (min 0.68, length 0.53). At **< −0.25** it flags ~14% of bubbles, catches ~36% of the wrong ones, and ~1 in 3 flags is a real error. Confidently wrong outputs are mostly OCR misreads (一 → "One") and idioms.
 - opus-mt's threshold (−0.96) flags the same 14% of the corpus; its confidence is a weaker signal (AUROC 0.63 on the same labels).
 - Broken outputs (`bad_output`) are always flagged.
+- **OCR confidence** (the lowest line score in a bubble) is a weak signal on its own: AUROC 0.56, since misreads are often confident. Added to the rule at < 0.8, it catches 40% of wrong translations instead of 36%, flags 18% of bubbles instead of 14%, and keeps ~1 in 3 flags a real error.
 - In the extension:
   - a flagged bubble gets an amber "?" badge; hover explains, and a click retranslates it with the accurate tier and redraws the page;
   - the popup has a highlight switch and "Retranslate N uncertain" for the current page.
