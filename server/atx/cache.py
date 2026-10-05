@@ -17,8 +17,8 @@ import threading
 import time
 from pathlib import Path
 
-PIPELINE_VERSION = 4  # 2: watermark filter, with_context flag; 3: detector frames + recovered text;
-#                       4: glyph size and OCR score per bubble
+PIPELINE_VERSION = 5  # 2: watermark filter, with_context flag; 3: detector frames + recovered text;
+#                       4: glyph size and OCR score per bubble; 5: merge bubbles inside bubbles
 DB = Path(__file__).resolve().parent.parent / "cache.db"
 
 _SCHEMA = """

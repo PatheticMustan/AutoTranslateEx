@@ -94,3 +94,21 @@ def test_detector_regions_split_but_never_merge():
     # One region covering two separate groups doesn't merge them.
     far = group_lines([col(300, 0, "一一"), col(100, 0, "二二")])
     assert len(split_by_regions(far, [(0, 0, 400, 400)])) == 2
+
+
+def test_bubble_inside_another_is_merged():
+    # OCR read two columns as one wide line (glyph size doubled); the last
+    # character came out alone, inside that line's box.
+    wide = Line((495, 737, 636, 881), "那邊是福利", 0.76)
+    last = Line((537, 835, 583, 882), "社", 0.99)
+    bubbles = group_lines([wide, last])
+    assert len(bubbles) == 1 and bubbles[0].text == "那邊是福利社"
+
+
+def test_unsure_stray_character_inside_a_bubble_is_dropped():
+    # A column ~60px wide; a stray character half that size inside it (too small
+    # to group with it normally).
+    text = Line((100, 100, 160, 580), "靳予澄想跟我復合", 0.99)
+    stray = Line((115, 300, 140, 325), "目", 0.71)
+    bubbles = group_lines([text, stray])
+    assert [b.text for b in bubbles] == ["靳予澄想跟我復合"]

@@ -126,9 +126,35 @@ def group_lines(lines: list[Line]) -> list[Bubble]:
     for i, ln in enumerate(lines):
         groups.setdefault(find(i), []).append(ln)
 
-    bubbles = [_make_bubble(g) for g in groups.values()]
+    bubbles = _merge_contained([_make_bubble(g) for g in groups.values()])
     # Page reading order: top to bottom, then right to left for bubbles side by side.
     bubbles.sort(key=lambda b: (_row_key(b), -b.box[2]))
+    return bubbles
+
+
+CONTAINED = 0.6  # share of a bubble's box inside another's that makes it part of it
+NOISE_SCORE = 0.9  # a contained one-character bubble read less surely than this is noise
+
+
+def _merge_contained(bubbles: list[Bubble]) -> list[Bubble]:
+    """A bubble sitting mostly inside another bubble's box is part of it. The
+    size check can keep them apart when OCR reads two columns as one wide line:
+    its glyph size doubles and the last character, read on its own, looks too
+    small to belong (那邊是福利 + 社)."""
+    merged = True
+    while merged:
+        merged = False
+        for small in sorted(bubbles, key=lambda b: _area(b.box)):
+            host = next((b for b in bubbles if b is not small and _area(b.box) > _area(small.box)
+                         and _cover(b.box, small.box) >= CONTAINED), None)
+            if host is not None:
+                bubbles = [b for b in bubbles if b is not small and b is not host]
+                # A stray character OCR wasn't sure of (嵩 at 0.54 inside a bubble) is
+                # noise: dropped, not pulled into the text. Real ones read surely (社 0.999).
+                noise = len(small.text) == 1 and small.ocr_score < NOISE_SCORE
+                bubbles.append(host if noise else _make_bubble(host.lines + small.lines))
+                merged = True
+                break
     return bubbles
 
 
