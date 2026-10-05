@@ -10,3 +10,6 @@ server/samples/
 server/cache.db*
 server/bench/report*.html
 server/bench/out/
+
+# Screenshots contain copyrighted comic pages; keep local for now
+screenshots/
