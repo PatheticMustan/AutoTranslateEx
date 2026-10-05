@@ -27,7 +27,8 @@ ATX.config = {
   // Drawing
   font: '"Comic Sans MS", "Comic Neue", "Segoe UI", sans-serif',
   fontWeight: 700,
-  maxFontPx: 28,
+  maxFontPx: 36,
+  glyphToFont: 0.72, // English size per pixel of the original Chinese glyph
   minFontPx: 10,
   comfortableFontPx: 14, // narrow boxes are widened until text fits at least this size
   lineHeight: 1.15,

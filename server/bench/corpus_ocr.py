@@ -41,7 +41,8 @@ def main() -> None:
             continue
         bubbles, _ = ocr_page(ocr, CORPUS / rel, det)
         done[rel] = [{"text": b.text, "box": list(b.box), "vertical": b.vertical,
-                      "frame": list(b.frame) if b.frame else None} for b in bubbles]
+                      "frame": list(b.frame) if b.frame else None, "size": b.size,
+                      "ocr_score": round(b.ocr_score, 3)} for b in bubbles]
         n += 1
         if n % 50 == 0:
             OUT.write_text(json.dumps(done, ensure_ascii=False), "utf-8")

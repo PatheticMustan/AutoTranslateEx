@@ -32,15 +32,23 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
     const fills = boxes.map((b) => bandMedian(ctx, b, canvas));
     // Text may spread into empty bubble around its box, but never into another
     // region's box or a text area already placed.
+    // Lay every region out first, then paint all backgrounds, then all text, so
+    // a box painted later never covers text placed earlier (boxes can overlap
+    // where two bubbles meet).
     const placed = [];
-    const areas = {};
-    regions.forEach((r, i) => {
+    const plans = regions.map((r, i) => {
       const neighbours = boxes.filter((_, j) => j !== i).map((b) => halfGap(boxes[i], b));
-      const snug = drawRegion(ctx, r, fills[i], canvas, [...neighbours, ...placed]);
-      placed.push(snug);
-      const b = boxes[i];
+      const plan = planRegion(ctx, r, fills[i], canvas, [...neighbours, ...placed]);
+      placed.push(plan.snug);
+      return plan;
+    });
+    plans.forEach(paintBackground);
+    const areas = {};
+    plans.forEach((plan, i) => {
+      paintText(plan);
+      const [b, snug] = [plan.box, plan.snug];
       areas[shown[i].i] = [Math.min(b[0], snug[0]), Math.min(b[1], snug[1]), Math.max(b[2], snug[2]), Math.max(b[3], snug[3])];
-      if (opts.highlight && r.flagged) drawBadge(ctx, snug, canvas);
+      if (opts.highlight && regions[i].flagged) drawBadge(ctx, snug, canvas);
     });
     // toBlob / convertToBlob encode in idle time and took a flat ~1 s per page;
     // the synchronous toDataURL takes ~20 ms.
@@ -112,10 +120,11 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
     });
   }
 
-  function drawRegion(ctx, region, fill, canvas, others) {
+  // Where a region's English goes: {box, snug, lay, fill}. Nothing is drawn yet.
+  function planRegion(ctx, region, fill, canvas, others) {
     const C = ATX.config;
     const box = padded(region.box, canvas);
-    const lay = layout(ctx, region.dst, box, fill, canvas, others, region.frame);
+    const lay = layout(ctx, region.dst, box, fill, canvas, others, region.frame, fontCap(region));
 
     // Paint only the original Chinese and a snug box around the English, not the
     // whole area the layout searched: that area is only mostly empty.
@@ -130,14 +139,22 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
       Math.min(lx1, Math.ceil(cx + textW / 2 + C.padPx)), Math.min(ly1, Math.ceil(cy + textH / 2 + C.padPx / 2)),
     ];
 
+    return { box, snug, lay, fill, cx, cy, ctx };
+  }
+
+  function paintBackground({ box, snug, lay, fill, ctx }) {
     ctx.fillStyle = `rgb(${fill.join(",")})`;
     for (const [x0, y0, x1, y1] of [box, snug]) {
       ctx.beginPath();
       ctx.roundRect(x0, y0, x1 - x0, y1 - y0, Math.min(8, lay.size / 2));
       ctx.fill();
     }
+  }
 
+  function paintText({ lay, fill, cx, cy, ctx }) {
+    const lineH = lay.size * ATX.config.lineHeight;
     const lum = 0.299 * fill[0] + 0.587 * fill[1] + 0.114 * fill[2];
+    ctx.font = font(lay.size);
     ctx.fillStyle = lum > 128 ? "#111" : "#fff";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -146,7 +163,6 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
       ctx.fillText(line, cx, y);
       y += lineH;
     }
-    return snug; // later regions may use the rest of the searched area
   }
 
   function font(size) {
@@ -154,10 +170,18 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
   }
 
   // -> {size, lines, box}: where and how big to set the text.
-  function layout(ctx, text, box, fill, canvas, others = [], frame = null) {
-    const inBubble = layoutInBubble(ctx, text, box, fill, canvas, others, frame);
+  // Largest font for a region: about the original lettering's size, so shouted
+  // text stays big and small print stays small (the server sends the glyph size).
+  function fontCap(region) {
+    const C = ATX.config;
+    if (!region.size) return C.maxFontPx;
+    return Math.max(C.comfortableFontPx, Math.min(C.maxFontPx, Math.round(region.size * C.glyphToFont)));
+  }
+
+  function layout(ctx, text, box, fill, canvas, others = [], frame = null, cap = ATX.config.maxFontPx) {
+    const inBubble = layoutInBubble(ctx, text, box, fill, canvas, others, frame, cap);
     if (inBubble.size >= ATX.config.comfortableFontPx) return inBubble;
-    const widened = layoutWidened(ctx, text, box, canvas.width);
+    const widened = layoutWidened(ctx, text, box, canvas.width, cap);
     const [wx0, wy0, wx1, wy1] = widened.box;
     const overlaps = others.some(([ox0, oy0, ox1, oy1]) => ox0 < wx1 && ox1 > wx0 && oy0 < wy1 && oy1 > wy0);
     return widened.size > inBubble.size && !overlaps ? widened : inBubble;
@@ -166,7 +190,7 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
   // Try rectangles centered on the OCR box: for each width, the tallest one that
   // is still empty bubble (fill-colored, or inside the OCR box, and not inside
   // another region's box). Keep the one allowing the largest font.
-  function layoutInBubble(ctx, text, box, fill, { width: W, height: H }, others, frame) {
+  function layoutInBubble(ctx, text, box, fill, { width: W, height: H }, others, frame, cap) {
     const C = ATX.config;
     const [x0, y0, x1, y1] = box;
     const w = x1 - x0, h = y1 - y0;
@@ -207,33 +231,44 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
       return sat[ry1 * s + rx1] - sat[ry0 * s + rx1] - sat[ry1 * s + rx0] + sat[ry0 * s + rx0];
     };
 
-    // Center on the bubble when known (its widest, tallest part), else on the text.
-    const [fx0, fy0, fx1, fy1] = frame || box;
-    const cx = (fx0 + fx1) / 2 - ax0, cy = (fy0 + fy1) / 2 - ay0;
+    // Candidate centers: the bubble's (its widest, tallest part), the text's, and
+    // between them. The bubble's center alone fails when a neighbour's text
+    // reaches into the bubble (two jagged bubbles that overlap).
+    const bc = [(x0 + x1) / 2 - ax0, (y0 + y1) / 2 - ay0];
+    const fc = frame ? [(frame[0] + frame[2]) / 2 - ax0, (frame[1] + frame[3]) / 2 - ay0] : bc;
+    // Also slid sideways and up/down by up to half the text box, toward open
+    // space (dots or art right next to the text otherwise pin it in place).
+    const shifts = [[0, 0], [w / 2, 0], [-w / 2, 0], [0, h / 4], [0, -h / 4]];
+    const centers = [fc, [(fc[0] + bc[0]) / 2, (fc[1] + bc[1]) / 2], bc]
+      .flatMap(([x, y]) => shifts.map(([dx, dy]) => [x + dx, y + dy]))
+      .filter((c, i, all) => all.findIndex((d) => Math.abs(d[0] - c[0]) + Math.abs(d[1] - c[1]) < 4) === i);
     let best = null;
     const step = Math.max(4, Math.round(w * 0.1));
-    for (let rw = w; rw <= aw; rw += step) {
-      const rx0 = Math.round(cx - rw / 2), rx1 = rx0 + rw;
-      if (rx0 < 0 || rx1 > aw) break;
-      // Tallest centered rectangle at this width that's still clean (grows monotonically).
-      let lo = 0, hi = Math.floor(Math.min(cy, ah - cy) * 2);
-      while (lo < hi) {
-        const mid = Math.ceil((lo + hi) / 2);
-        const ry0 = Math.round(cy - mid / 2), ry1 = ry0 + mid;
-        if (dirtyIn(rx0, ry0, rx1, ry1) <= MAX_DIRTY * rw * mid) lo = mid; else hi = mid - 1;
+    for (const [cx, cy] of centers) {
+      for (let rw = w; rw <= aw; rw += step) {
+        const rx0 = Math.round(cx - rw / 2), rx1 = rx0 + rw;
+        if (rx0 < 0 || rx1 > aw) break;
+        // Tallest centered rectangle at this width that's still clean (grows monotonically).
+        let lo = 0, hi = Math.floor(Math.min(cy, ah - cy) * 2);
+        while (lo < hi) {
+          const mid = Math.ceil((lo + hi) / 2);
+          const ry0 = Math.round(cy - mid / 2), ry1 = ry0 + mid;
+          if (dirtyIn(rx0, ry0, rx1, ry1) <= MAX_DIRTY * rw * mid) lo = mid; else hi = mid - 1;
+        }
+        if (lo < C.minFontPx * 1.5) continue;
+        const fitted = largestFont(ctx, text, rw - 2 * C.padPx, lo - 2 * C.padPx, cap);
+        if (!best || fitted.size > best.size) {
+          const ry0 = Math.round(cy - lo / 2);
+          best = { ...fitted, box: [ax0 + rx0, ay0 + ry0, ax0 + rx1, ay0 + ry0 + lo] };
+        }
       }
-      if (lo < C.minFontPx * 1.5) continue;
-      const fitted = largestFont(ctx, text, rw - 2 * C.padPx, lo - 2 * C.padPx);
-      if (!best || fitted.size > best.size) {
-        const ry0 = Math.round(cy - lo / 2);
-        best = { ...fitted, box: [ax0 + rx0, ay0 + ry0, ax0 + rx1, ay0 + ry0 + lo] };
-      }
+      if (best && best.size >= cap) break; // can't do better than the cap
     }
-    return best || { ...largestFont(ctx, text, w - 2 * C.padPx, h - 2 * C.padPx), box };
+    return best || { ...largestFont(ctx, text, w - 2 * C.padPx, h - 2 * C.padPx, cap), box };
   }
 
   // Fallback: widen the box (centered, inside the image), covering art.
-  function layoutWidened(ctx, text, box, imageWidth) {
+  function layoutWidened(ctx, text, box, imageWidth, cap) {
     const C = ATX.config;
     const [x0, y0, x1, y1] = box;
     const w = x1 - x0, h = y1 - y0;
@@ -242,16 +277,16 @@ var ATX = globalThis.ATX || (globalThis.ATX = {});
       const width = Math.min(imageWidth - 4, Math.round(w * scale));
       if (best && width <= best.box[2] - best.box[0]) break; // can't widen further
       const nx0 = Math.max(2, Math.min(Math.round((x0 + x1) / 2 - width / 2), imageWidth - 2 - width));
-      const fitted = largestFont(ctx, text, width - 2 * C.padPx, h - 2 * C.padPx);
+      const fitted = largestFont(ctx, text, width - 2 * C.padPx, h - 2 * C.padPx, cap);
       if (!best || fitted.size > best.size) best = { ...fitted, box: [nx0, y0, nx0 + width, y1] };
       if (best.size >= C.comfortableFontPx) break;
     }
     return best;
   }
 
-  function largestFont(ctx, text, maxW, maxH) {
+  function largestFont(ctx, text, maxW, maxH, cap = ATX.config.maxFontPx) {
     const C = ATX.config;
-    for (let size = C.maxFontPx; size >= C.minFontPx; size--) {
+    for (let size = cap; size >= C.minFontPx; size--) {
       ctx.font = font(size);
       const { lines, broke } = wrap(ctx, text, maxW);
       // Splitting a word only counts as fitting at the smallest size; before

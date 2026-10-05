@@ -338,7 +338,8 @@ class Pipeline:
             found, _ = ocr_page(self.ocr, image, self.detector)
             ocr_s = time.perf_counter() - t0
         bubbles = [{"box": list(b.box), "text": b.text, "vertical": b.vertical,
-                    "frame": list(b.frame) if b.frame else None} for b in found]
+                    "frame": list(b.frame) if b.frame else None, "size": b.size,
+                    "ocr_score": round(b.ocr_score, 3)} for b in found]
         self.cache.put_ocr(sha1, self.ocr_key, bubbles)
         return bubbles, ocr_s
 
@@ -380,7 +381,7 @@ class Pipeline:
         for i in indices:
             b = bubbles[i]
             redone[i] = {"box": b["box"], "src": texts[i], "dst": dst[i], "vertical": b["vertical"],
-                         "frame": b.get("frame"), "confidence": scores[i], "by": better,
+                         "frame": b.get("frame"), "size": b.get("size"), "confidence": scores[i], "by": better,
                          "flagged": flagged(better, texts[i], dst[i], scores[i])}
 
         key, _ = self._result_key(impl, texts, glossary)
@@ -448,6 +449,7 @@ class Pipeline:
 
         result = {"w": w, "h": h, "with_context": bool(context), "regions": [
             {"box": b["box"], "src": b["text"], "dst": d, "vertical": b["vertical"], "frame": b.get("frame"),
+             "size": b.get("size"),
              "confidence": c, "flagged": flagged(impl, b["text"], d, c)}
             for b, d, c in zip(bubbles, dst, scores)
         ]}

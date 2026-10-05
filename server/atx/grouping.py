@@ -37,6 +37,19 @@ class Bubble:
         return "".join(line.text for line in self.lines)
 
     @property
+    def size(self) -> int:
+        """Glyph size of the original lettering (median over lines), in pixels:
+        the renderer scales the English to it."""
+        sizes = sorted(line.char_size for line in self.lines)
+        return round(sizes[len(sizes) // 2])
+
+    @property
+    def ocr_score(self) -> float:
+        """The OCR's confidence in its least certain line: a misread line makes
+        the whole translation suspect."""
+        return min(line.score for line in self.lines)
+
+    @property
     def box(self) -> tuple[int, int, int, int]:
         xs0, ys0, xs1, ys1 = zip(*(line.box for line in self.lines))
         return min(xs0), min(ys0), max(xs1), max(ys1)
