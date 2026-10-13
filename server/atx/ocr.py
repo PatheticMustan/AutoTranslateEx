@@ -103,14 +103,16 @@ class Ocr:
     def _cap_detection_size(self, side: int) -> None:
         """Run detection on the page scaled down to `side` px on its longest edge.
 
-        RapidOCR's "max" mode ignores limit_side_len (it picks 960/1500/2000 from
-        the image size, so these pages are never shrunk), so replace its hook.
-        Recognition still crops from the full-resolution page.
+        RapidOCR's "max" mode ignores limit_side_len before 3.10 (it picks
+        960/1500/2000 from the image size, so these pages are never shrunk), so
+        replace its hook. Recognition still crops from the full-resolution page.
+        From 3.10 the detector is loaded lazily and the hook takes no argument.
         """
         from rapidocr.ch_ppocr_det.utils import DetPreProcess
 
-        det = self._engine.text_det
-        det.get_preprocess = lambda max_wh: DetPreProcess(side, "max", det.mean, det.std)
+        load = getattr(self._engine, "_load_det_model", None)
+        det = load() if load else self._engine.text_det
+        det.get_preprocess = lambda *_: DetPreProcess(side, "max", det.mean, det.std)
 
     def __call__(self, image: str | Path | bytes | np.ndarray) -> OcrResult:
         t0 = time.perf_counter()
